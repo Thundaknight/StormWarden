@@ -5,6 +5,8 @@ export interface User {
   username: string;
   password_hash: string;
   role: UserRole;
+  discord_id: string;
+  discord_username: string;
   created_at: string;
 }
 
@@ -46,8 +48,18 @@ export interface Script {
   require_confirm: number;
   ephemeral_output: number;
   enabled: number;
+  /** JSON ScriptOption[] */
+  options_json: string;
   created_at: string;
   updated_at: string;
+}
+
+/** A Discord slash-command option whose value must be one of a fixed list. */
+export interface ScriptOption {
+  name: string;          // discord option name, [a-z0-9_-]{1,32}; env var SW_OPT_<NAME>
+  description: string;
+  required: boolean;
+  choices: Array<{ label: string; value: string }>;
 }
 
 export interface SubjectRef {
@@ -79,6 +91,9 @@ export interface VikunjaProjectMap {
   vikunja_project_id: number;
   channel_id: string;
   enabled: number;
+  container_id: number | null;
+  /** JSON number[] — labels offered in the triage dropdown (empty = all, first 25) */
+  label_ids: string;
 }
 
 export interface FeatureRequest {
@@ -90,6 +105,8 @@ export interface FeatureRequest {
   requester_name: string;
   title: string;
   done: number;
+  bucket_id: number;
+  triage_message_id: string;
   created_at: string;
 }
 

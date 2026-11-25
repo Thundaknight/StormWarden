@@ -58,6 +58,9 @@ export async function getStates(names: string[]): Promise<Map<string, ContainerS
 }
 
 export async function performAction(name: string, action: ContainerAction): Promise<void> {
+  // Late import: guard.ts imports this module for the docker client.
+  const { assertNotProtected } = await import('./guard');
+  await assertNotProtected(name);
   const c = docker.getContainer(name);
   try {
     if (action === 'start') await c.start();

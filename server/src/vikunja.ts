@@ -7,7 +7,13 @@ import { getSettings } from './db';
  */
 
 export interface VikunjaProject { id: number; title: string; archived?: boolean; parent_project_id?: number }
-export interface VikunjaTask { id: number; title: string; done: boolean; identifier?: string; index?: number; project_id: number }
+export interface VikunjaLabel { id: number; title: string; hex_color?: string }
+export interface VikunjaTask {
+  id: number; title: string; done: boolean; identifier?: string; index?: number; project_id: number;
+  bucket_id?: number; labels?: VikunjaLabel[] | null;
+}
+export interface VikunjaView { id: number; title: string; view_kind: string | number; default_bucket_id?: number; done_bucket_id?: number }
+export interface VikunjaBucket { id: number; title: string; position?: number }
 export interface VikunjaComment {
   id: number;
   comment: string;
@@ -49,14 +55,32 @@ const V2_METHOD: Record<Verb, string> = { GET: 'GET', CREATE: 'POST', UPDATE: 'P
 const V1_METHOD: Record<Verb, string> = { GET: 'GET', CREATE: 'PUT', UPDATE: 'POST', DELETE: 'DELETE' };
 
 async function call(verb: Verb, path: string, body?: unknown): Promise<any> {
+  return callVerbs(V2_METHOD[verb], V1_METHOD[verb], path, body);
+}
+
+/** For routes whose v1 verb doesn't follow the usual PUT-create pattern. */
+async function callVerbs(v2Method: string, v1Method: string, path: string, body?: unknown): Promise<any> {
   try {
-    return await raw(V2_METHOD[verb], `/api/v2${path}`, body);
+    return await raw(v2Method, `/api/v2${path}`, body);
   } catch (err) {
     if (err instanceof VikunjaError && (err.status === 404 || err.status === 405)) {
-      return raw(V1_METHOD[verb], `/api/v1${path}`, body);
+      return raw(v1Method, `/api/v1${path}`, body);
     }
     throw err;
   }
+}
+
+async function listAll<T>(path: string, max = 10): Promise<T[]> {
+  const out: T[] = [];
+  const sep = path.includes('?') ? '&' : '?';
+  for (let page = 1; page <= max; page++) {
+    const data = await call('GET', `${path}${sep}page=${page}&per_page=50`);
+    const items = unwrapList<T>(data);
+    out.push(...items);
+    const totalPages = data && !Array.isArray(data) ? data.total_pages : undefined;
+    if (items.length < 50 || (totalPages && page >= totalPages)) break;
+  }
+  return out;
 }
 
 function unwrapList<T>(data: any): T[] {
@@ -103,15 +127,36 @@ export const vikunja = {
   },
 
   async listProjects(): Promise<VikunjaProject[]> {
-    const out: VikunjaProject[] = [];
-    for (let page = 1; page <= 20; page++) {
-      const data = await call('GET', `/projects?page=${page}&per_page=50`);
-      const items = unwrapList<VikunjaProject>(data);
-      out.push(...items);
-      const totalPages = data && !Array.isArray(data) ? data.total_pages : undefined;
-      if (items.length < 50 || (totalPages && page >= totalPages)) break;
-    }
-    return out.filter((p) => p.id > 0 && !p.archived);
+    const all = await listAll<VikunjaProject>('/projects', 20);
+    return all.filter((p) => p.id > 0 && !p.archived);
+  },
+
+  /** The project's (first) Kanban view, or null if it has none. */
+  async getKanbanView(projectId: number): Promise<VikunjaView | null> {
+    const views = unwrapList<VikunjaView>(await call('GET', `/projects/${projectId}/views`));
+    return views.find((v) => v.view_kind === 'kanban' || v.view_kind === 3) || null;
+  },
+
+  async listBuckets(projectId: number, viewId: number): Promise<VikunjaBucket[]> {
+    const b = unwrapList<VikunjaBucket>(await call('GET', `/projects/${projectId}/views/${viewId}/buckets`));
+    return b.sort((x, y) => (x.position ?? 0) - (y.position ?? 0));
+  },
+
+  async moveToBucket(projectId: number, viewId: number, bucketId: number, taskId: number): Promise<void> {
+    await callVerbs('POST', 'POST', `/projects/${projectId}/views/${viewId}/buckets/${bucketId}/tasks`, { task_id: taskId });
+  },
+
+  /** Labels visible to the token's user (own labels + labels on tasks it can see). */
+  async listLabels(): Promise<VikunjaLabel[]> {
+    return (await listAll<VikunjaLabel>('/labels', 10)).sort((a, b) => a.title.localeCompare(b.title));
+  },
+
+  async addLabel(taskId: number, labelId: number): Promise<void> {
+    await call('CREATE', `/tasks/${taskId}/labels`, { label_id: labelId });
+  },
+
+  async removeLabel(taskId: number, labelId: number): Promise<void> {
+    await call('DELETE', `/tasks/${taskId}/labels/${labelId}`);
   },
 
   async createTask(projectId: number, title: string, descriptionHtml: string): Promise<VikunjaTask> {

@@ -3,9 +3,14 @@
 StormWarden is Stormsmith's partner. Stormsmith runs the game servers. StormWarden handles **everything else on StormTower**: bots, tools and services, operated from Discord by the people you choose.
 
 - **Container control from Discord.** Members get `/docker status|start|stop|restart`, and only for the containers they've been granted. Containers are always set up beforehand on Unraid (plain Docker or Compose). StormWarden never creates or reconfigures them from Discord, and container logs are only visible in the web panel. Anything beyond start/stop/restart, like pulling or rebuilding, has to be a script command you wrote.
-- **Your scripts as slash commands.** Write a script in the web UI, such as `git pull` + `docker compose -p frostgate up -d --build`. Give it a name like `updatefrostgate` and it becomes `/updatefrostgate` in Discord. Output streams live into an embed, and every run is logged with full output.
-- **Feature requests into Vikunja.** `/request <project>` opens a form, files a task in the mapped Vikunja project, and starts a Discord thread. Thread replies become Vikunja comments, and Vikunja comments get posted back into the thread. When the task is marked done, the thread gets a closing note and is archived.
-- **Web control panel** for you. Manage containers, per-role and per-user grants, scripts and their run history, request projects, Discord bot settings, web users, and an audit log of who did what.
+- **Your scripts as slash commands.** Write a script in the web UI, such as `git pull` + `docker compose -p frostgate up -d --build`. Give it a name like `updatefrostgate` and it becomes `/updatefrostgate` in Discord.
+  - Scripts can offer **choices** (fixed lists you define), which reach the script as `$SW_OPT_<NAME>`.
+  - Output streams live into an embed, and every run is logged with full output.
+  - Failures **ping** a role or person you pick in the log channel.
+  - Script commands are **hidden** from everyone except the roles or people you grant them to.
+- **Feature requests into Vikunja.** Each container gets its own request project, role-gated from the web UI. `/request <project>` opens a form, files a task in the linked Vikunja project, and starts a Discord thread with a **triage panel** for admins (Kanban column and label dropdowns, filled from Vikunja). Thread replies become Vikunja comments, and Vikunja comments get posted back into the thread. When the task is marked done, the thread gets a closing note and is archived.
+- **Hands off itself and Stormsmith.** StormWarden refuses to control its own container (no self-restart or self-update) and any container Stormsmith manages. It learns which those are from Stormsmith's own database.
+- **Web control panel** for you, LAN-only. Sign in with a password, or with Discord as a backup (linked accounts only). You can switch password sign-in off entirely. Manage containers, per-role and per-user grants, scripts and their run history, request projects, Discord bot settings, web users, and an audit log of who did what.
 
 Same stack and look as Stormsmith: Node 22 + TypeScript + Express + better-sqlite3 + dockerode + discord.js, and React 18 + Vite. All data lives in one SQLite file.
 
@@ -17,7 +22,32 @@ Same stack and look as Stormsmith: Node 22 + TypeScript + Express + better-sqlit
 | **Warden admins in Discord** (Administrator permission, the server owner, or a role you pick under *Discord Bot → Warden admins*) | Every container action, every script, every request project. |
 | **Everyone else in Discord** | Only what a **grant** gives them. A grant targets a **role** (anyone holding it) or a **single user**. |
 
-Grants are set per container (**View** or **Start/Stop/Restart**), per script (allowed or not), and per request project. A request project with no grants is open to every member. Grants add up: one matching grant is enough.
+Grants are set per container (**View** or **Start/Stop/Restart**), per script (allowed or not), and per request project. A request project or script with no grants is **admins only**. Grants add up: one matching grant is enough. Triaging requests (setting the Kanban column and labels) is always admins only.
+
+### Off-limits containers
+
+- **StormWarden itself.** It finds its own container automatically, by matching its hostname to the container ID (override with `STORMWARDEN_CONTAINER=<name>`). It can't be added, started, stopped or restarted through StormWarden. Scripts that mention it by name are refused when you save them.
+- **Stormsmith's game servers.** StormWarden reads the `servers` table from Stormsmith's SQLite file every 30s. By default that's `/mnt/user/appdata/stormsmith/stormsmith.db`, which you can change on the Containers page. It reads a temporary copy, so Stormsmith's file is never touched. Those containers can't be added, and if one you already added later gets imported into Stormsmith, it locks immediately. If the file can't be read, the last known list stays in force and the Containers page shows a warning.
+
+## Hidden script commands
+
+Every script command is registered with `default_member_permissions = 0`, so only Discord admins see it at first. Discord doesn't let a bot reveal commands to particular roles with its own token; that needs a server manager's OAuth token with the `applications.commands.permissions.update` scope. So, once:
+
+1. Fill in **Application ID**, **Client secret** and **Web UI address** on the Discord Bot page. Add the redirect URI it shows to the Developer Portal under OAuth2 → Redirects.
+2. Click **Authorise visibility sync** and approve in Discord.
+
+After that, whenever you change a script's grants or the Warden admin roles, StormWarden re-syncs each command's visibility to exactly those roles and people. The token refreshes automatically; **Revoke** clears it. The run-time permission check still applies, even if someone can see a command.
+
+## Script options (choices)
+
+Each script can have up to 5 options, each with up to 25 choices (`Label | value`, one per line). Discord shows them as dropdowns, and StormWarden checks the value against your list again before running. The chosen value is passed only as an environment variable, `SW_OPT_<NAME>` (uppercased, with `-` turned into `_`), never written into the script text. Use it quoted:
+
+```sh
+case "$SW_OPT_TARGET" in
+  frostgate) cd /mnt/user/appdata/repos/frostgate && git pull && docker compose -p frostgate up -d --build ;;
+  eve)       cd /mnt/user/appdata/repos/eve-corp-progress-bot && git pull && docker compose up -d --build ;;
+esac
+```
 
 ## Scripts: how they run
 
@@ -61,17 +91,23 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/user/appdata/stormwarden:/app/data
-      - /mnt/user/appdata/repos:/mnt/user/appdata/repos       # same path on both sides!
-      # - /mnt/user/appdata/stormwarden/ssh:/root/.ssh:ro      # deploy key for private repos
+      - /mnt/user/appdata:/mnt/user/appdata                   # same path on both sides! (repos, Stormsmith DB)
+      # - /boot/config/ssh/root:/root/.ssh:ro                 # only if your repos pull over SSH (see below)
 ```
 
 Then open `http://192.168.10.35:8090` and create the owner account. Port 8090 avoids a clash with Stormsmith on 8080.
 
+For Discord sign-in, use a stable address as the web UI address, e.g. `https://warden.local.stormconnect.ca` through Nginx Proxy Manager. Discord redirects your browser back to it, so it only has to resolve on your LAN.
+
+If Discord sign-in ever breaks while password sign-in is switched off, set `ALLOW_PASSWORD_LOGIN=1` on the container and restart it. That turns password sign-in back on until you remove the variable.
+
 To build the image yourself: `docker build -t thundaknight/stormwarden .`
 
-**Private repos / `git pull` credentials.** Scripts run with `GIT_TERMINAL_PROMPT=0`, so a missing credential fails fast instead of hanging. Pick one:
-- SSH: put a read-only deploy key and a `known_hosts` file in `/mnt/user/appdata/stormwarden/ssh/`, mount it at `/root/.ssh:ro`, and use an `git@github.com:` remote.
-- HTTPS: set a credential helper or token-bearing remote in the repo's own `.git/config`.
+**`git pull` credentials.** Scripts run with `GIT_TERMINAL_PROMPT=0`, so a missing credential fails fast instead of hanging. StormWarden sees your repo folders, but not Unraid's `/root`. Run `git remote -v` in the repo:
+- `https://github.com/...` on a public repo: nothing to do.
+- `https://user:token@github.com/...`: works as-is, because the token lives in the repo's own `.git/config`.
+- `git@github.com:...` (SSH): mount Unraid's persistent key folder read-only with `/boot/config/ssh/root:/root/.ssh:ro`, or use a dedicated deploy key folder instead.
+- HTTPS with a credential helper that stores the token in `~/.git-credentials`: switch to one of the options above.
 
 > **Security note.** StormWarden holds the Docker socket and runs shell scripts, so it effectively has root on the host. Keep the web UI on the LAN, or behind Nginx Proxy Manager with HTTPS. Only web admins can create or edit scripts. Discord members can run them, but never change them.
 
@@ -87,6 +123,8 @@ To build the image yourself: `docker build -t thundaknight/stormwarden .`
 | `SCRIPT_SHELL` | `/bin/bash` | Shell used for scripts |
 | `MAX_RUN_OUTPUT` | `262144` | Bytes of output kept per run (oldest trimmed) |
 | `VIKUNJA_POLL_MS` | `60000` | How often Vikunja comments/done-state are checked |
+| `STORMWARDEN_CONTAINER` | _(auto)_ | Own container name, if auto-detection fails |
+| `ALLOW_PASSWORD_LOGIN` | _(unset)_ | `1` = break-glass: password sign-in works even if switched off |
 
 ## Discord bot setup
 
@@ -99,9 +137,19 @@ Commands are registered as **guild** commands, so changes show up within seconds
 
 ## Vikunja setup
 
-1. In Vikunja → **Settings → API Tokens**, create a token with: Projects *read*, Tasks *create/read*, Task Comments *create/read*.
-2. StormWarden → **Requests**: enter the Vikunja URL (e.g. `https://projects.stormconnect.ca`) and the token, then **Save & test**.
-3. **Add project**: pick the Vikunja project, the name members see, a short key (used as the thread prefix, e.g. `[frostgate] Add /roles`), and the channel for threads. A **forum channel** gets one post per request; a text channel gets a message plus a thread. Leave the channel empty to start the thread wherever `/request` was used.
+1. Create a dedicated **StormWarden** user in Vikunja. Registration is off on your instance, so use the Vikunja CLI: `vikunja user create`.
+2. **Share each request project with that user with *write* access**, since moving a task between Kanban columns needs write access.
+3. Signed in as that user, go to **Settings → API Tokens** and create a token with: Projects *read*, Project views/buckets *read* and *update*, Tasks *create/read/update*, Task comments *create/read*, Labels *read*, Task labels *create/delete*.
+4. **Labels:** Vikunja only shows a user its own labels, plus labels already used on tasks in projects shared with it. Either create the triage labels you want (Bug, Feature, …) while signed in as the StormWarden user, or make sure they're already on a task in each shared project.
+5. StormWarden → **Requests**: enter the Vikunja URL (`https://projects.stormconnect.ca`) and the token, then **Save & test**.
+6. **Add project** (one per container):
+   - The **container** (fills in the name and key)
+   - The **Vikunja project**
+   - The **thread channel**: a forum channel gets one post per request; a text channel gets a message plus a thread
+   - The **triage labels** to offer (max 25)
+   - **Who can request**: the roles or people. Empty means admins only.
+
+Each new request thread gets a **🗂️ Triage** panel with two dropdowns, filled from Vikunja: the project's Kanban columns (the task starts in the default column) and the labels. Only Warden admins can use them. Changes apply to the task right away, and the panel updates to show the current state. Adding or removing labels only touches the labels the panel offers, so labels you add directly in Vikunja are left alone.
 
 StormWarden targets Vikunja's **`/api/v2`** (Vikunja ≥ 2.4). If a route isn't there, it automatically retries the `/api/v1` form, so older instances work too.
 

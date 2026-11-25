@@ -1,10 +1,10 @@
 import {
-  ChannelType, Client, EmbedBuilder, ForumChannel, GuildMember, Message, NewsChannel, TextChannel, ThreadChannel,
+  ActionRowBuilder, ChannelType, Client, EmbedBuilder, StringSelectMenuBuilder, ForumChannel, GuildMember, Message, NewsChannel, TextChannel, ThreadChannel,
 } from 'discord.js';
 import { config } from '../config';
 import {
-  audit, createRequest, getProjectMap, getRequestByThread, getSettings, isCommentSynced, listOpenSyncedRequests,
-  markCommentSynced, setRequestDone, setRequestThread,
+  audit, createRequest, getProjectMap, getRequest, getRequestByThread, getSettings, isCommentSynced, listOpenSyncedRequests,
+  markCommentSynced, setRequestDone, setRequestThread, setRequestTriage,
 } from '../db';
 import type { FeatureRequest, VikunjaProjectMap } from '../types';
 import { htmlToText, textToHtml, escapeHtml, vikunja } from '../vikunja';
@@ -67,6 +67,8 @@ class RequestSync {
         setRequestThread(request.id, thread.id);
         threadId = thread.id;
         threadUrl = thread.url;
+        await this.postTriage(request.id, thread).catch((err) =>
+          console.warn('[requests] triage message failed:', err?.message || err));
       }
     } catch (err: any) {
       console.warn('[requests] could not open thread:', err?.message || err);
@@ -107,6 +109,95 @@ class RequestSync {
     }
     await thread.members.add(member.id).catch(() => {});
     return thread;
+  }
+
+  // ---------------------------------------------------------------- triage (Kanban bucket + labels)
+
+  /** Posts the admin-only triage panel into a new request thread. */
+  private async postTriage(requestId: number, thread: ThreadChannel): Promise<void> {
+    const req = getRequest(requestId)!;
+    const project = getProjectMap(req.project_map_id)!;
+    const view = await vikunja.getKanbanView(project.vikunja_project_id).catch(() => null);
+    if (view?.default_bucket_id) setRequestTriage(requestId, { bucket_id: view.default_bucket_id });
+    const panel = await this.renderTriage(requestId);
+    const msg = await thread.send(panel);
+    setRequestTriage(requestId, { triage_message_id: msg.id });
+  }
+
+  /** Builds the triage panel from live Vikunja state (bucket list, labels, the task's current labels). */
+  async renderTriage(requestId: number): Promise<{ embeds: EmbedBuilder[]; components: ActionRowBuilder<StringSelectMenuBuilder>[] }> {
+    const req = getRequest(requestId);
+    if (!req) throw new Error('Request not found');
+    const project = getProjectMap(req.project_map_id);
+    if (!project) throw new Error('Request project was deleted');
+
+    const [view, task, allLabels] = await Promise.all([
+      vikunja.getKanbanView(project.vikunja_project_id).catch(() => null),
+      vikunja.getTask(req.vikunja_task_id),
+      vikunja.listLabels().catch(() => []),
+    ]);
+    const buckets = view ? await vikunja.listBuckets(project.vikunja_project_id, view.id).catch(() => []) : [];
+    let allowed: number[] = [];
+    try { allowed = JSON.parse(project.label_ids || '[]'); } catch { /* all */ }
+    const labels = (allowed.length ? allLabels.filter((l) => allowed.includes(l.id)) : allLabels).slice(0, 25);
+    const current = new Set((task.labels || []).map((l) => l.id));
+    const bucketId = req.bucket_id || view?.default_bucket_id || 0;
+
+    const embed = new EmbedBuilder()
+      .setColor(0xffd23f)
+      .setTitle('🗂️ Triage')
+      .setDescription('StormWarden admins: pick a Kanban column and labels. Changes apply to the Vikunja task immediately.')
+      .addFields(
+        { name: 'Column', value: buckets.find((b) => b.id === bucketId)?.title || '—', inline: true },
+        { name: 'Labels', value: (task.labels || []).map((l) => l.title).join(', ') || '—', inline: true },
+      );
+
+    const rows: ActionRowBuilder<StringSelectMenuBuilder>[] = [];
+    if (buckets.length) {
+      rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder().setCustomId(`sw:tb:${req.id}`).setPlaceholder('Kanban column…')
+          .addOptions(buckets.slice(0, 25).map((b) => ({ label: b.title.slice(0, 100), value: String(b.id), default: b.id === bucketId }))),
+      ));
+    } else {
+      embed.setFooter({ text: 'This project has no Kanban view, so there are no columns to pick.' });
+    }
+    if (labels.length) {
+      rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder().setCustomId(`sw:tl:${req.id}`).setPlaceholder('Labels…')
+          .setMinValues(0).setMaxValues(labels.length)
+          .addOptions(labels.map((l) => ({ label: l.title.slice(0, 100), value: String(l.id), default: current.has(l.id) }))),
+      ));
+    }
+    return { embeds: [embed], components: rows };
+  }
+
+  /** Applies a triage selection to Vikunja, then returns the refreshed panel. */
+  async applyTriage(requestId: number, change: { bucketId?: number; labelIds?: number[] }, actor: string) {
+    const req = getRequest(requestId);
+    if (!req) throw new Error('Request not found');
+    const project = getProjectMap(req.project_map_id);
+    if (!project) throw new Error('Request project was deleted');
+
+    if (change.bucketId) {
+      const view = await vikunja.getKanbanView(project.vikunja_project_id);
+      if (!view) throw new Error('Project has no Kanban view');
+      await vikunja.moveToBucket(project.vikunja_project_id, view.id, change.bucketId, req.vikunja_task_id);
+      setRequestTriage(requestId, { bucket_id: change.bucketId });
+      audit(actor, 'discord', 'request.triage.column', req.title, `bucket ${change.bucketId}`);
+    }
+    if (change.labelIds) {
+      const task = await vikunja.getTask(req.vikunja_task_id);
+      const have = new Set((task.labels || []).map((l) => l.id));
+      const want = new Set(change.labelIds);
+      // Only touch labels this panel offers, so labels added in Vikunja outside that list survive.
+      let offered: number[] = [];
+      try { offered = JSON.parse(project.label_ids || '[]'); } catch { /* all */ }
+      const inScope = (id: number) => !offered.length || offered.includes(id);
+      for (const id of want) if (!have.has(id)) await vikunja.addLabel(req.vikunja_task_id, id);
+      for (const id of have) if (!want.has(id) && inScope(id)) await vikunja.removeLabel(req.vikunja_task_id, id);
+      audit(actor, 'discord', 'request.triage.labels', req.title, [...want].join(','));
+    }
+    return this.renderTriage(requestId);
   }
 
   /** Discord → Vikunja. */

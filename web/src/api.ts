@@ -1,6 +1,6 @@
 import type {
   AuditEntry, BotStatus, ContainerGrant, FeatureRequest, GuildMeta, HostContainer, ManagedContainer, ProjectMap, Run,
-  RunSummary, Script, Settings, SubjectRef, User, VikunjaProject,
+  RunSummary, Script, Settings, SubjectRef, User, VikunjaLabel, VikunjaProject,
 } from './types';
 
 const TOKEN_KEY = 'sw_token';
@@ -27,10 +27,12 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  authStatus: () => request<{ needsSetup: boolean; version: string }>('GET', '/api/auth/status'),
+  authStatus: () => request<{ needsSetup: boolean; version: string; discordLogin: boolean; passwordLogin: boolean }>('GET', '/api/auth/status'),
+  setPasswordLogin: (disabled: boolean) => request<{ ok: boolean }>('POST', '/api/auth/password-login', { disabled }),
+  unlinkDiscord: () => request<{ ok: boolean }>('POST', '/api/auth/discord/unlink'),
   setup: (username: string, password: string) => request<{ token: string; user: User }>('POST', '/api/auth/setup', { username, password }),
   login: (username: string, password: string) => request<{ token: string; user: User }>('POST', '/api/auth/login', { username, password }),
-  me: () => request<{ user: { userId: number; username: string; role: 'admin' } }>('GET', '/api/auth/me'),
+  me: () => request<{ user: { userId: number; username: string; role: 'admin'; discord_username: string } }>('GET', '/api/auth/me'),
 
   listUsers: () => request<{ users: User[] }>('GET', '/api/users'),
   createUser: (username: string, password: string) => request<{ user: User }>('POST', '/api/users', { username, password }),
@@ -55,7 +57,7 @@ export const api = {
   updateScript: (id: number, data: Partial<Script>) => request<{ script: Script }>('PUT', `/api/scripts/${id}`, data),
   setScriptGrants: (id: number, grants: SubjectRef[]) => request('PUT', `/api/scripts/${id}/grants`, { grants }),
   deleteScript: (id: number) => request('DELETE', `/api/scripts/${id}`),
-  runScript: (id: number) => request<{ runId: number }>('POST', `/api/scripts/${id}/run`),
+  runScript: (id: number, options: Record<string, string> = {}) => request<{ runId: number }>('POST', `/api/scripts/${id}/run`, { options }),
   listRuns: (scriptId?: number, limit = 50) =>
     request<{ runs: RunSummary[] }>('GET', `/api/scripts/runs?limit=${limit}${scriptId ? `&script=${scriptId}` : ''}`),
   getRun: (runId: number) => request<{ run: Run }>('GET', `/api/scripts/runs/${runId}`),
@@ -68,6 +70,7 @@ export const api = {
   searchMembers: (q: string) => request<{ members: Array<{ id: string; name: string }> }>('GET', `/api/settings/discord/members?q=${encodeURIComponent(q)}`),
 
   testVikunja: () => request<{ ok: boolean; projectCount: number }>('GET', '/api/requests/vikunja/test'),
+  vikunjaLabels: () => request<{ labels: VikunjaLabel[] }>('GET', '/api/requests/vikunja/labels'),
   vikunjaProjects: () => request<{ projects: VikunjaProject[] }>('GET', '/api/requests/vikunja/projects'),
   listProjectMaps: () => request<{ projects: ProjectMap[] }>('GET', '/api/requests/projects'),
   createProjectMap: (data: Partial<ProjectMap>) => request<{ project: ProjectMap }>('POST', '/api/requests/projects', data),

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import GrantEditor from '../components/GrantEditor';
-import type { ManagedContainer, Run, RunSummary, SubjectRef } from '../types';
+import type { ManagedContainer, Run, RunSummary, ScriptOption, SubjectRef } from '../types';
+import Modal from '../components/Modal';
 import { useGuildMeta } from '../useGuildMeta';
 import { RunTable } from './Scripts';
 import { fmtTime } from '../format';
@@ -23,6 +24,8 @@ export default function ScriptEditor() {
     timeout_sec: 600, require_confirm: true, ephemeral_output: false, enabled: true,
   });
   const [grants, setGrants] = useState<SubjectRef[]>([]);
+  const [options, setOptions] = useState<OptionDraft[]>([]);
+  const [runPicker, setRunPicker] = useState<Record<string, string> | null>(null);
   const [containers, setContainers] = useState<ManagedContainer[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [run, setRun] = useState<Run | null>(null);
@@ -41,6 +44,7 @@ export default function ScriptEditor() {
         ephemeral_output: !!s.ephemeral_output, enabled: !!s.enabled,
       });
       setGrants(s.grants);
+      setOptions(s.options.map(toDraft));
     }).catch((e) => setError(e.message));
   }, [isNew, scriptId]);
 
@@ -74,7 +78,9 @@ export default function ScriptEditor() {
   const save = async (): Promise<number | null> => {
     setError(''); setNotice(''); setSaving(true);
     try {
-      const payload: any = { ...form, container_id: form.container_id ? parseInt(form.container_id, 10) : null };
+      const payload: any = {
+        ...form, container_id: form.container_id ? parseInt(form.container_id, 10) : null, options: options.map(fromDraft),
+      };
       const r = isNew ? await api.createScript(payload) : await api.updateScript(scriptId, payload);
       await api.setScriptGrants(r.script.id, grants);
       setNotice(`Saved. /${r.script.command_name} is ${r.script.enabled ? 'registered in Discord (may take a few seconds)' : 'disabled'}.`);
@@ -88,13 +94,18 @@ export default function ScriptEditor() {
     }
   };
 
-  const runNow = async () => {
+  const runNow = async (picked: Record<string, string> = {}) => {
     const sid = await save();
     if (!sid) return;
     try {
-      const r = await api.runScript(sid);
+      const r = await api.runScript(sid, picked);
+      setRunPicker(null);
       setParams({ run: String(r.runId) });
     } catch (e: any) { setError(e.message); }
+  };
+  const startRun = () => {
+    if (options.length) setRunPicker(Object.fromEntries(options.map((o) => [o.name, o.required ? fromDraft(o).choices[0]?.value || '' : ''])));
+    else runNow();
   };
 
   const remove = async () => {
@@ -110,7 +121,7 @@ export default function ScriptEditor() {
         <h1>{isNew ? 'New script' : <span className="cmd-name">/{form.command_name}</span>}</h1>
         <div className="btn-row">
           {!isNew && <button className="btn btn-danger-outline" onClick={remove}>Delete</button>}
-          {!isNew && <button className="btn" onClick={runNow} disabled={saving}>Save &amp; run now</button>}
+          {!isNew && <button className="btn" onClick={startRun} disabled={saving}>Save &amp; run now</button>}
           <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
         </div>
       </div>
@@ -162,6 +173,41 @@ export default function ScriptEditor() {
 
         <div>
           <div className="card">
+            <div className="card-head-row">
+              <h2 style={{ margin: 0 }}>Options (choices)</h2>
+              <button className="btn btn-small" disabled={options.length >= 5}
+                onClick={() => setOptions([...options, { name: '', description: '', required: true, choicesText: '' }])}>+ Add option</button>
+            </div>
+            <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
+              Members pick from your list in Discord; the value reaches the script as <span className="mono">$SW_OPT_&lt;NAME&gt;</span>. Max 5 options, 25 choices each.
+            </p>
+            {options.map((o, idx) => (
+              <div key={idx} className="option-card">
+                <div className="form-grid">
+                  <label>Name
+                    <input className="mono" value={o.name} placeholder="target"
+                      onChange={(e) => setOptions(options.map((x, i) => (i === idx ? { ...x, name: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') } : x)))} />
+                    {o.name && <span className="hint">→ <span className="mono">$SW_OPT_{o.name.toUpperCase().replace(/-/g, '_')}</span></span>}
+                  </label>
+                  <label>Description
+                    <input value={o.description} placeholder="Which stack to rebuild"
+                      onChange={(e) => setOptions(options.map((x, i) => (i === idx ? { ...x, description: e.target.value } : x)))} />
+                  </label>
+                  <label className="span-2">Choices — one per line, <span className="mono">Label | value</span> or just <span className="mono">value</span>
+                    <textarea className="code-editor" style={{ minHeight: 80 }} rows={3} value={o.choicesText} placeholder={'Production | main\nTesting | dev'}
+                      onChange={(e) => setOptions(options.map((x, i) => (i === idx ? { ...x, choicesText: e.target.value } : x)))} />
+                  </label>
+                </div>
+                <div className="btn-row" style={{ justifyContent: 'space-between' }}>
+                  <label className="checkbox-label" style={{ margin: 0 }}>
+                    <input type="checkbox" checked={o.required} onChange={(e) => setOptions(options.map((x, i) => (i === idx ? { ...x, required: e.target.checked } : x)))} /> Required
+                  </label>
+                  <button className="btn btn-ghost btn-small" onClick={() => setOptions(options.filter((_, i) => i !== idx))}>Remove</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="card">
             <h2>Who can run it in Discord</h2>
             <p className="hint" style={{ marginTop: -6, marginBottom: 10 }}>Discord admins can always run every script. Add roles or specific people for everyone else.</p>
             <GrantEditor grants={grants as any} onChange={(g) => setGrants(g as any)} meta={meta} />
@@ -174,6 +220,20 @@ export default function ScriptEditor() {
           )}
         </div>
       </div>
+
+      {runPicker && (
+        <Modal title={`Run /${form.command_name}`} onClose={() => setRunPicker(null)}>
+          {options.map((o) => (
+            <label key={o.name}>{o.name}{o.required ? '' : ' (optional)'}
+              <select value={runPicker[o.name] || ''} onChange={(e) => setRunPicker({ ...runPicker, [o.name]: e.target.value })}>
+                {!o.required && <option value="">— none —</option>}
+                {fromDraft(o).choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+              </select>
+            </label>
+          ))}
+          <button className="btn btn-primary" onClick={() => runNow(runPicker)}>Run</button>
+        </Modal>
+      )}
 
       {run && (
         <div className="card">
@@ -189,4 +249,21 @@ export default function ScriptEditor() {
       )}
     </div>
   );
+}
+
+interface OptionDraft { name: string; description: string; required: boolean; choicesText: string }
+
+function toDraft(o: ScriptOption): OptionDraft {
+  return {
+    name: o.name, description: o.description, required: o.required,
+    choicesText: o.choices.map((c) => (c.label === c.value ? c.value : `${c.label} | ${c.value}`)).join('\n'),
+  };
+}
+
+function fromDraft(d: OptionDraft): ScriptOption {
+  const choices = d.choicesText.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+    const [label, value] = l.includes('|') ? l.split('|').map((x) => x.trim()) : [l, l];
+    return { label: label || value, value: value || label };
+  });
+  return { name: d.name, description: d.description, required: d.required, choices };
 }

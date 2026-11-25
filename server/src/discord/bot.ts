@@ -1,16 +1,19 @@
 import {
   ActionRowBuilder, AttachmentBuilder, AutocompleteInteraction, ButtonBuilder, ButtonInteraction, ButtonStyle,
   ChannelType, ChatInputCommandInteraction, Client, EmbedBuilder, GatewayIntentBits, GuildMember, Interaction,
-  Message, ModalBuilder, ModalSubmitInteraction, REST, Routes, SlashCommandBuilder, TextInputBuilder,
-  TextInputStyle,
+  Message, ModalBuilder, ModalSubmitInteraction, REST, Routes, SlashCommandBuilder, StringSelectMenuInteraction,
+  TextInputBuilder, TextInputStyle,
 } from 'discord.js';
+import crypto from 'crypto';
 import {
-  audit, getContainer, getProjectMap, getScript, getScriptByCommand, getSettings, listScripts,
+  audit, getContainer, getProjectMap, getScript, getScriptByCommand, getSettings, listScriptGrants, listScripts,
 } from '../db';
+import { getPermAccessToken } from '../discordOAuth';
+import { getSelfContainerName, getStormsmithContainers } from '../guard';
 import { getStates, getUptimeStart, performAction, type ContainerAction, type ContainerState } from '../docker';
-import { isScriptRunning, runScript, type RunResult } from '../scriptRunner';
+import { isScriptRunning, parseOptions, runScript, type RunResult } from '../scriptRunner';
 import type { Script } from '../types';
-import { canContainer, canRequest, canRunScript, containersFor, projectsFor } from './perms';
+import { canContainer, canRequest, canRunScript, containersFor, isWardenAdmin, projectsFor } from './perms';
 import { requestSync } from './requests';
 
 const STATE_EMOJI: Record<ContainerState, string> = {
@@ -20,6 +23,9 @@ const STATE_EMOJI: Record<ContainerState, string> = {
 type OutputSink = (payload: { content?: string; embeds?: EmbedBuilder[]; files?: AttachmentBuilder[] }) => Promise<void>;
 
 const COLOR = { running: 0xffd23f, success: 0x3fc97c, failed: 0xff4d4d, info: 0x3aa8ff };
+
+/** Script invocations awaiting their confirm button (holds the chosen option values). */
+interface PendingRun { scriptId: number; userId: string; options: Record<string, string>; expires: number }
 
 /** Interaction tokens last 15 min; stop using editReply a little before that. */
 const TOKEN_SAFE_MS = 14 * 60_000;
@@ -48,10 +54,17 @@ function formatUptime(startedAt: string | null): string {
 class DiscordBot {
   client: Client | null = null;
   lastError = '';
+  /** Result of the last script-command visibility sync, shown on the Discord page. */
+  permSync = { ok: false, message: 'Not synced yet', at: '' };
   private commandRefreshTimer: NodeJS.Timeout | null = null;
+  private pending = new Map<string, PendingRun>();
 
   isRunning(): boolean {
     return !!this.client?.isReady();
+  }
+
+  status() {
+    return { running: this.isRunning(), error: this.lastError, permSync: this.permSync };
   }
 
   async start(): Promise<void> {
@@ -183,16 +196,64 @@ class DiscordBot {
       .setDMPermission(false)
       .addStringOption((o) => o.setName('project').setDescription('Which project').setRequired(true).setAutocomplete(true));
 
-    const scriptCmds = listScripts().filter((sc) => sc.enabled).map((sc) =>
-      new SlashCommandBuilder()
+    // Script commands are hidden from everyone but Discord admins (default_member_permissions = 0);
+    // syncCommandPermissions() then reveals each one to exactly the roles/users granted in the web UI.
+    const scriptCmds = listScripts().filter((sc) => sc.enabled).map((sc) => {
+      const b = new SlashCommandBuilder()
         .setName(sc.command_name)
         .setDescription((sc.description || `Run the ${sc.command_name} script`).slice(0, 100))
-        .setDMPermission(false));
+        .setDMPermission(false)
+        .setDefaultMemberPermissions(0);
+      for (const opt of parseOptions(sc)) {
+        b.addStringOption((o) => o.setName(opt.name).setDescription(opt.description.slice(0, 100) || opt.name)
+          .setRequired(opt.required)
+          .addChoices(...opt.choices.map((c) => ({ name: c.label.slice(0, 100), value: c.value }))));
+      }
+      return b;
+    });
 
     const body = [docker, request, ...scriptCmds].map((c) => c.toJSON());
     const rest = new REST({ version: '10' }).setToken(s.discord_bot_token);
-    await rest.put(Routes.applicationGuildCommands(this.client.application.id, s.discord_guild_id), { body });
+    const registered = await rest.put(Routes.applicationGuildCommands(this.client.application.id, s.discord_guild_id), { body }) as Array<{ id: string; name: string }>;
     console.log(`[discord] registered ${body.length} guild commands`);
+    await this.syncCommandPermissions(registered);
+  }
+
+  /**
+   * Makes each hidden script command visible to the roles/users granted it (plus Warden admin roles).
+   * Discord only accepts this from a guild manager's OAuth token with the
+   * applications.commands.permissions.update scope — authorised once from the Discord page.
+   */
+  private async syncCommandPermissions(registered: Array<{ id: string; name: string }>): Promise<void> {
+    const s = getSettings();
+    const at = new Date().toISOString();
+    const token = await getPermAccessToken();
+    if (!token) {
+      this.permSync = { ok: false, at, message: 'Not authorised — script commands are visible to Discord admins only until you authorise command-permission sync.' };
+      return;
+    }
+    const appId = this.client!.application!.id;
+    const failures: string[] = [];
+    let synced = 0;
+    for (const sc of listScripts().filter((x) => x.enabled)) {
+      const cmd = registered.find((r) => r.name === sc.command_name);
+      if (!cmd) continue;
+      const perms = new Map<string, { id: string; type: 1 | 2; permission: true }>();
+      for (const r of s.discord_admin_role_ids) perms.set(r, { id: r, type: 1, permission: true });
+      for (const g of listScriptGrants(sc.id)) perms.set(g.subject_id, { id: g.subject_id, type: g.subject_type === 'role' ? 1 : 2, permission: true });
+      const res = await fetch(`https://discord.com/api/v10/applications/${appId}/guilds/${s.discord_guild_id}/commands/${cmd.id}/permissions`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permissions: [...perms.values()].slice(0, 100) }),
+        signal: AbortSignal.timeout(10_000),
+      }).catch((err) => ({ ok: false, status: 0, text: async () => String(err) }) as any);
+      if (res.ok) synced++;
+      else failures.push(`/${sc.command_name}: ${res.status} ${(await res.text()).slice(0, 120)}`);
+    }
+    this.permSync = failures.length
+      ? { ok: false, at, message: `Synced ${synced}, failed ${failures.length}: ${failures.join('; ')}` }
+      : { ok: true, at, message: `Visibility synced for ${synced} script command${synced === 1 ? '' : 's'}.` };
+    if (failures.length) console.warn('[discord] command permission sync:', this.permSync.message);
   }
 
   // ---------------------------------------------------------------- dispatch
@@ -209,6 +270,7 @@ class DiscordBot {
       return;
     }
     if (i.isButton()) return this.handleButton(i);
+    if (i.isStringSelectMenu()) return this.handleSelect(i);
     if (i.isModalSubmit()) return this.handleModal(i);
   }
 
@@ -216,6 +278,13 @@ class DiscordBot {
     if (i.member instanceof GuildMember) return i.member;
     if (!i.guild) return null;
     return i.guild.members.fetch(i.user.id).catch(() => null);
+  }
+
+  /** Containers a member may use, minus StormWarden itself and anything Stormsmith manages. */
+  private async usableContainers(member: GuildMember, kind: 'view' | 'control') {
+    const self = await getSelfContainerName();
+    const ss = getStormsmithContainers().names;
+    return containersFor(member, kind).filter((c) => c.container_name !== self && !ss.has(c.container_name));
   }
 
   private async handleAutocomplete(i: AutocompleteInteraction): Promise<void> {
@@ -227,7 +296,7 @@ class DiscordBot {
     if (i.commandName === 'docker' && focused.name === 'container') {
       const sub = i.options.getSubcommand();
       const kind = sub === 'status' ? 'view' : 'control';
-      const list = containersFor(member, kind)
+      const list = (await this.usableContainers(member, kind))
         .filter((c) => !q || c.display_name.toLowerCase().includes(q) || c.container_name.toLowerCase().includes(q))
         .slice(0, 25)
         .map((c) => ({ name: `${c.display_name} (${c.container_name})`.slice(0, 100), value: String(c.id) }));
@@ -270,7 +339,7 @@ class DiscordBot {
           );
         return void i.editReply({ embeds: [embed] });
       }
-      const visible = containersFor(member, 'view');
+      const visible = await this.usableContainers(member, 'view');
       if (!visible.length) return void i.reply({ content: 'You don\'t have access to any containers.', ephemeral: true });
       await i.deferReply();
       const states = await getStates(visible.map((c) => c.container_name));
@@ -314,6 +383,9 @@ class DiscordBot {
     } catch (err: any) {
       audit(member.user.username, 'discord', `container.${action}.failed`, c.container_name, err?.message || String(err));
       await reply(`❌ Could not ${action} **${c.display_name}**: ${err?.message || err}`);
+      if (err?.statusCode !== 403) {
+        this.postLog(`🐳 **${member.displayName}** tried to ${action} **${c.display_name}** — failed: ${err?.message || err}`, true);
+      }
     }
   }
 
@@ -328,20 +400,37 @@ class DiscordBot {
     if (busy) {
       return void i.reply({ content: `⏳ /${script.command_name} is already running (started by ${busy.actor}, run #${busy.runId}).`, ephemeral: true });
     }
+    const options: Record<string, string> = {};
+    for (const opt of parseOptions(script)) {
+      const v = i.options.getString(opt.name);
+      if (v) options[opt.name] = v;
+    }
+    const optText = this.describeOptions(script, options);
 
     if (script.require_confirm) {
+      // Button custom ids are capped at 100 chars, so the chosen options wait server-side under a nonce.
+      const nonce = crypto.randomBytes(6).toString('hex');
+      this.pending.set(nonce, { scriptId: script.id, userId: member.id, options, expires: Date.now() + 10 * 60_000 });
+      for (const [k, v] of this.pending) if (v.expires < Date.now()) this.pending.delete(k);
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(`sw:run:${script.id}:${member.id}`).setLabel(`Run /${script.command_name}`).setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`sw:run:${nonce}:${member.id}`).setLabel(`Run /${script.command_name}`).setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(`sw:cancel:${member.id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary),
       );
       return void i.reply({
-        content: `**/${script.command_name}** — ${script.description || 'run this script'}\nRun it now?`,
+        content: `**/${script.command_name}** — ${script.description || 'run this script'}${optText ? `\n${optText}` : ''}\nRun it now?`,
         components: [row], ephemeral: true,
       });
     }
 
     await i.deferReply({ ephemeral: !!script.ephemeral_output });
-    await this.executeScript(script, member, this.replySink(i, !!script.ephemeral_output));
+    await this.executeScript(script, member, this.replySink(i, !!script.ephemeral_output), options);
+  }
+
+  private describeOptions(script: Script, options: Record<string, string>): string {
+    return parseOptions(script)
+      .filter((o) => options[o.name])
+      .map((o) => `**${o.name}:** ${o.choices.find((c) => c.value === options[o.name])?.label || options[o.name]}`)
+      .join(' · ');
   }
 
   /** Where a run's live output goes: the interaction reply, or a fresh message in the channel. */
@@ -367,8 +456,9 @@ class DiscordBot {
   }
 
   /** Runs a script and streams its output into a Discord embed, re-rendered every ~1.5s. */
-  private async executeScript(script: Script, member: GuildMember, sink: OutputSink): Promise<void> {
+  private async executeScript(script: Script, member: GuildMember, sink: OutputSink, options: Record<string, string> = {}): Promise<void> {
     const t0 = Date.now();
+    const optText = this.describeOptions(script, options);
     const render = (output: string, result?: RunResult) => {
       const status = result ? result.status : 'running';
       const icon = { running: '⏳', success: '✅', failed: '❌', timeout: '⌛', error: '⚠️' }[status];
@@ -380,6 +470,7 @@ class DiscordBot {
           { name: 'Run by', value: `${member}`, inline: true },
           { name: 'Duration', value: formatDuration(result ? result.durationMs : Date.now() - t0), inline: true },
         );
+      if (optText) embed.addFields({ name: 'Options', value: optText.slice(0, 1000) });
       if (result) embed.addFields({ name: 'Exit code', value: String(result.exitCode ?? '—'), inline: true });
       return embed;
     };
@@ -389,8 +480,9 @@ class DiscordBot {
     let started: { runId: number; done: Promise<RunResult> };
     let pending: Promise<void> = Promise.resolve();
     try {
-      started = runScript(script, { name: member.user.username, id: member.id, source: 'discord' }, (out) => {
-        pending = pending.then(() => safe({ embeds: [render(out)] }));
+      started = runScript(script, { name: member.user.username, id: member.id, source: 'discord' }, {
+        options,
+        onOutput: (out) => { pending = pending.then(() => safe({ embeds: [render(out)] })); },
       });
     } catch (err: any) {
       await safe({ content: `❌ ${err?.message || err}`, embeds: [] });
@@ -404,8 +496,16 @@ class DiscordBot {
       : [];
     await safe({ embeds: [render(result.output, result)], files });
 
-    this.postLog(`🛠️ **${member.displayName}** ran \`/${script.command_name}\` → **${result.status}** `
-      + `(exit ${result.exitCode ?? '—'}, ${formatDuration(result.durationMs)}, run #${result.runId})`);
+    this.postRunLog(script, `**${member.displayName}**`, result);
+  }
+
+  /** Log-channel line for a finished run; failures ping the configured role/user. */
+  postRunLog(script: Script, who: string, result: RunResult): void {
+    const base = getSettings().web_base_url;
+    const link = base ? ` · [output](${base}/scripts/${script.id}?run=${result.runId})` : '';
+    const ok = result.status === 'success';
+    this.postLog(`${ok ? '🛠️' : '🚨'} ${who} ran \`/${script.command_name}\` → **${result.status}** `
+      + `(exit ${result.exitCode ?? '—'}, ${formatDuration(result.durationMs)}, run #${result.runId})${link}`, !ok);
   }
 
   // ---------------------------------------------------------------- buttons
@@ -430,21 +530,41 @@ class DiscordBot {
     }
 
     if (kind === 'run') {
-      const script = getScript(parseInt(a, 10));
+      const p = this.pending.get(a);
+      this.pending.delete(a);
+      const script = p ? getScript(p.scriptId) : undefined;
+      if (!p || p.expires < Date.now()) return void i.update({ content: 'That confirmation expired — run the command again.', components: [] });
       if (!script || !script.enabled) return void i.update({ content: 'That script is no longer available.', components: [] });
       if (!canRunScript(member, script)) return void i.update({ content: 'You no longer have permission for that.', components: [] });
       if (isScriptRunning(script.id)) return void i.update({ content: `⏳ /${script.command_name} is already running.`, components: [] });
       if (script.ephemeral_output) {
         await i.update({ content: 'Starting…', components: [] });
-        return this.executeScript(script, member, this.replySink(i, true));
+        return this.executeScript(script, member, this.replySink(i, true), p.options);
       }
       // The confirm prompt was ephemeral; the run itself is posted publicly in the channel.
       await i.update({ content: `▶️ Started /${script.command_name} — output below.`, components: [] });
-      const sink = this.channelSink(i);
-      if (!sink) {
-        return this.executeScript(script, member, this.replySink(i, true));
-      }
-      return this.executeScript(script, member, sink);
+      const sink = this.channelSink(i) || this.replySink(i, true);
+      return this.executeScript(script, member, sink, p.options);
+    }
+  }
+
+  // ---------------------------------------------------------------- triage selects (request threads)
+
+  private async handleSelect(i: StringSelectMenuInteraction): Promise<void> {
+    const [ns, kind, reqId] = i.customId.split(':');
+    if (ns !== 'sw' || (kind !== 'tb' && kind !== 'tl')) return;
+    const member = await this.member(i);
+    if (!member || !isWardenAdmin(member)) {
+      return void i.reply({ content: '🚫 Only StormWarden admins can triage requests.', ephemeral: true });
+    }
+    await i.deferUpdate();
+    try {
+      const view = await requestSync.applyTriage(parseInt(reqId, 10), kind === 'tb'
+        ? { bucketId: parseInt(i.values[0], 10) }
+        : { labelIds: i.values.map((v) => parseInt(v, 10)) }, member.user.username);
+      await i.editReply(view);
+    } catch (err: any) {
+      await i.followUp({ content: `❌ Vikunja update failed: ${err?.message || err}`, ephemeral: true });
     }
   }
 
@@ -499,13 +619,17 @@ class DiscordBot {
     await i.reply({ content: '🚫 You don\'t have permission to do that.', ephemeral: true });
   }
 
-  /** Best-effort line in the optional log channel. */
-  postLog(content: string): void {
-    const id = getSettings().discord_log_channel_id;
+  /** Best-effort line in the optional log channel. `alert` prepends the configured failure ping. */
+  postLog(content: string, alert = false): void {
+    const s = getSettings();
+    const id = s.discord_log_channel_id;
     if (!id || !this.client?.isReady()) return;
+    const ping = alert ? s.discord_failure_ping : null;
+    const mention = ping ? (ping.type === 'role' ? `<@&${ping.id}> ` : `<@${ping.id}> `) : '';
+    const allowedMentions = ping ? (ping.type === 'role' ? { roles: [ping.id] } : { users: [ping.id] }) : { parse: [] as [] };
     this.client.channels.fetch(id)
       .then(async (ch) => {
-        if (ch && ch.isTextBased() && 'send' in ch) await ch.send({ content, allowedMentions: { parse: [] } });
+        if (ch && ch.isTextBased() && 'send' in ch) await ch.send({ content: mention + content, allowedMentions });
       })
       .catch(() => {});
   }

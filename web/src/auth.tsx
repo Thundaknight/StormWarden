@@ -8,6 +8,7 @@ interface AuthState {
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
   setup: (username: string, password: string) => Promise<void>;
+  loginWithToken: (token: string) => Promise<void>;
   logout: () => void;
 }
 
@@ -31,9 +32,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const setup = useCallback(async (u: string, p: string) => {
     const r = await api.setup(u, p); setToken(r.token); setUser(r.user);
   }, []);
+  const loginWithToken = useCallback(async (token: string) => {
+    setToken(token);
+    const r = await api.me();
+    setUser({ id: r.user.userId, username: r.user.username, role: r.user.role });
+  }, []);
   const logout = useCallback(() => { clearToken(); setUser(null); }, []);
 
-  const value = useMemo(() => ({ user, loading, login, setup, logout }), [user, loading, login, setup, logout]);
+  const value = useMemo(() => ({ user, loading, login, setup, loginWithToken, logout }), [user, loading, login, setup, loginWithToken, logout]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

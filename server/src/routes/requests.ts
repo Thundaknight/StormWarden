@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../auth';
 import {
-  audit, createProjectMap, deleteProjectMap, getProjectMap, getProjectMapByKey, isSubjectType, listProjectGrants,
+  audit, createProjectMap, getContainer, deleteProjectMap, getProjectMap, getProjectMapByKey, isSubjectType, listProjectGrants,
   listProjectMaps, listRequests, setProjectGrants, updateProjectMap, type ProjectMapInput,
 } from '../db';
 import { requestSync } from '../discord/requests';
@@ -22,10 +22,19 @@ function parse(body: any, existingId?: number): { input?: ProjectMapInput; error
   if (!pid) return { error: 'Pick a Vikunja project' };
   const channel = String(body?.channel_id || '').trim();
   if (channel && !/^\d{15,22}$/.test(channel)) return { error: 'Invalid channel id' };
+  const containerId = body?.container_id ? parseInt(String(body.container_id), 10) : null;
+  if (containerId) {
+    if (!getContainer(containerId)) return { error: 'Linked container not found' };
+    const other = listProjectMaps().find((p) => p.container_id === containerId && p.id !== existingId);
+    if (other) return { error: `That container already has a request project (${other.display_name})` };
+  }
+  const labelIds = (Array.isArray(body?.label_ids) ? body.label_ids : []).map((x: unknown) => parseInt(String(x), 10)).filter((x: number) => x > 0);
+  if (labelIds.length > 25) return { error: 'Pick at most 25 triage labels (Discord dropdown limit)' };
   return {
     input: {
       key, display_name: String(body?.display_name || key).slice(0, 80), vikunja_project_id: pid,
-      channel_id: channel, enabled: body?.enabled === false ? 0 : 1,
+      channel_id: channel, enabled: body?.enabled === false || body?.enabled === 0 ? 0 : 1,
+      container_id: containerId, label_ids: JSON.stringify(labelIds),
     },
   };
 }
@@ -39,9 +48,17 @@ router.get('/vikunja/projects', asyncRoute(async (_req, res) => {
   res.json({ projects: await vikunja.listProjects() });
 }));
 
+router.get('/vikunja/labels', asyncRoute(async (_req, res) => {
+  res.json({ labels: await vikunja.listLabels() });
+}));
+
 router.get('/projects', (_req, res) => {
   const grants = listProjectGrants();
-  res.json({ projects: listProjectMaps().map((p) => ({ ...p, grants: grants.filter((g) => g.project_map_id === p.id) })) });
+  res.json({
+    projects: listProjectMaps().map((p) => ({
+      ...p, label_ids: JSON.parse(p.label_ids || '[]'), grants: grants.filter((g) => g.project_map_id === p.id),
+    })),
+  });
 });
 
 router.post('/projects', (req, res) => {

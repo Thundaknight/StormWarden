@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import { config } from './config';
 import { audit, createRun, finishRun, getContainer, updateRunOutput } from './db';
-import type { RunStatus, Script } from './types';
+import type { RunStatus, Script, ScriptOption } from './types';
 
 export interface RunActor {
   name: string;
@@ -42,7 +42,11 @@ const SCRUBBED_ENV = ['JWT_SECRET'];
  * - One run per script at a time; a second invocation is rejected rather than queued.
  * - Timeout kills the whole process group (so `docker compose ... --build` children die too).
  */
-export function runScript(script: Script, actor: RunActor, onOutput?: OutputListener): { runId: number; done: Promise<RunResult> } {
+export function runScript(
+  script: Script, actor: RunActor, opts: { options?: Record<string, string>; onOutput?: OutputListener } = {},
+): { runId: number; done: Promise<RunResult> } {
+  const onOutput = opts.onOutput;
+  const optionEnv = resolveOptions(script, opts.options || {});
   if (running.has(script.id)) {
     throw new Error(`/${script.command_name} is already running (started by ${running.get(script.id)!.actor}).`);
   }
@@ -58,8 +62,11 @@ export function runScript(script: Script, actor: RunActor, onOutput?: OutputList
     script_id: script.id, command_name: script.command_name, triggered_by: actor.name, triggered_by_id: actor.id, source: actor.source,
   });
   const startedAt = Date.now();
+  let output = '';
   running.set(script.id, { runId, actor: actor.name, startedAt });
-  audit(actor.name, actor.source, 'script.run', `/${script.command_name}`, `run #${runId}`);
+  const optDesc = Object.entries(opts.options || {}).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join(' ');
+  audit(actor.name, actor.source, 'script.run', `/${script.command_name}`, `run #${runId}${optDesc ? ` (${optDesc})` : ''}`);
+  if (optDesc) output = `[StormWarden] Options: ${optDesc}\n`;
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of SCRUBBED_ENV) delete env[k];
@@ -76,9 +83,9 @@ export function runScript(script: Script, actor: RunActor, onOutput?: OutputList
     SW_TRIGGERED_BY_ID: actor.id,
     SW_SOURCE: actor.source,
     SW_CONTAINER: container?.container_name || '',
+    ...optionEnv,
   });
 
-  let output = '';
   let trimmed = false;
   const append = (chunk: Buffer | string) => {
     output += chunk.toString().replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r(?!\n)/g, '\n');
@@ -148,3 +155,57 @@ export const COMMAND_NAME_RE = /^[a-z0-9_-]{1,32}$/;
 
 /** Built-in command names that admin scripts may not shadow. */
 export const RESERVED_COMMANDS = new Set(['docker', 'request', 'warden']);
+
+export function parseOptions(script: Pick<Script, 'options_json'>): ScriptOption[] {
+  try {
+    const v = JSON.parse(script.options_json || '[]');
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Turns caller-chosen option values into SW_OPT_<NAME> env vars, accepting only values from the
+ * admin-defined choice list. Discord already enforces choices, but this is the real gate.
+ */
+export function resolveOptions(script: Script, provided: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const opt of parseOptions(script)) {
+    const v = provided[opt.name];
+    if (v === undefined || v === null || v === '') {
+      if (opt.required) throw new Error(`Option "${opt.name}" is required.`);
+      env[`SW_OPT_${opt.name.toUpperCase().replace(/-/g, '_')}`] = '';
+      continue;
+    }
+    if (!opt.choices.some((c) => c.value === v)) throw new Error(`"${v}" is not an allowed value for ${opt.name}.`);
+    env[`SW_OPT_${opt.name.toUpperCase().replace(/-/g, '_')}`] = v;
+  }
+  return env;
+}
+
+export const OPTION_NAME_RE = /^[a-z0-9_-]{1,32}$/;
+
+/** Validates admin input for a script's option list; returns cleaned options or an error. */
+export function validateOptions(input: unknown): { options?: ScriptOption[]; error?: string } {
+  if (!Array.isArray(input)) return { options: [] };
+  if (input.length > 5) return { error: 'At most 5 options per script' };
+  const seen = new Set<string>();
+  const out: ScriptOption[] = [];
+  for (const raw of input as any[]) {
+    const name = String(raw?.name || '').trim().toLowerCase();
+    if (!OPTION_NAME_RE.test(name)) return { error: `Option name "${name}" must be 1–32 chars: lowercase letters, numbers, - or _` };
+    if (seen.has(name)) return { error: `Duplicate option "${name}"` };
+    seen.add(name);
+    const choices = (Array.isArray(raw?.choices) ? raw.choices : [])
+      .map((c: any) => ({ label: String(c?.label || c?.value || '').trim().slice(0, 100), value: String(c?.value || '').trim().slice(0, 100) }))
+      .filter((c: { label: string; value: string }) => c.value);
+    if (!choices.length) return { error: `Option "${name}" needs at least one choice` };
+    if (choices.length > 25) return { error: `Option "${name}" has more than 25 choices (Discord's limit)` };
+    if (new Set(choices.map((c: { value: string }) => c.value)).size !== choices.length) return { error: `Option "${name}" has duplicate values` };
+    out.push({ name, description: String(raw?.description || name).slice(0, 100) || name, required: !!raw?.required, choices });
+  }
+  // Discord requires required options to come before optional ones
+  out.sort((a, b) => Number(b.required) - Number(a.required));
+  return { options: out };
+}

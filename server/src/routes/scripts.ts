@@ -1,16 +1,18 @@
 import { Router } from 'express';
+import { asyncRoute } from './helpers';
 import { requireAuth } from '../auth';
 import {
   audit, createScript, deleteScript, getContainer, getRun, getScript, getScriptByCommand, isSubjectType,
   listRuns, listScriptGrants, listScripts, setScriptGrants, updateScript, type ScriptInput,
 } from '../db';
 import { discordBot } from '../discord/bot';
-import { COMMAND_NAME_RE, isScriptRunning, RESERVED_COMMANDS, runScript } from '../scriptRunner';
+import { COMMAND_NAME_RE, isScriptRunning, RESERVED_COMMANDS, runScript, validateOptions } from '../scriptRunner';
+import { getSelfContainerName } from '../guard';
 
 const router = Router();
 router.use(requireAuth);
 
-function parseInput(body: any, existingId?: number): { input?: ScriptInput; error?: string } {
+async function parseInput(body: any, existingId?: number): Promise<{ input?: ScriptInput; error?: string }> {
   const command_name = String(body?.command_name || '').trim().toLowerCase();
   if (!COMMAND_NAME_RE.test(command_name)) {
     return { error: 'Command name must be 1–32 characters: lowercase letters, numbers, - or _' };
@@ -23,6 +25,14 @@ function parseInput(body: any, existingId?: number): { input?: ScriptInput; erro
   const containerId = body?.container_id ? parseInt(String(body.container_id), 10) : null;
   if (containerId && !getContainer(containerId)) return { error: 'Linked container not found' };
   const timeout = parseInt(String(body?.timeout_sec ?? 600), 10);
+  const opts = validateOptions(body?.options);
+  if (opts.error) return { error: opts.error };
+  // StormWarden must never restart/update itself (it would kill its own run mid-way).
+  const self = await getSelfContainerName();
+  const selfNames = [self, 'stormwarden'].filter(Boolean) as string[];
+  if (selfNames.some((n) => new RegExp(`(^|[^A-Za-z0-9_.-])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^A-Za-z0-9_.-])`, 'i').test(scriptBody))) {
+    return { error: 'Scripts may not reference StormWarden\'s own container — it can\'t restart or update itself.' };
+  }
   return {
     input: {
       command_name,
@@ -34,6 +44,7 @@ function parseInput(body: any, existingId?: number): { input?: ScriptInput; erro
       require_confirm: body?.require_confirm === false ? 0 : 1,
       ephemeral_output: body?.ephemeral_output ? 1 : 0,
       enabled: body?.enabled === false ? 0 : 1,
+      options_json: JSON.stringify(opts.options || []),
     },
   };
 }
@@ -41,7 +52,7 @@ function parseInput(body: any, existingId?: number): { input?: ScriptInput; erro
 function withExtras(id: number) {
   const s = getScript(id)!;
   const last = listRuns({ scriptId: id, limit: 1 })[0] || null;
-  return { ...s, grants: listScriptGrants(id), last_run: last, running: !!isScriptRunning(id) };
+  return { ...s, options: JSON.parse(s.options_json || '[]'), grants: listScriptGrants(id), last_run: last, running: !!isScriptRunning(id) };
 }
 
 router.get('/', (_req, res) => {
@@ -65,27 +76,27 @@ router.get('/:id', (req, res) => {
   res.json({ script: withExtras(id) });
 });
 
-router.post('/', (req, res) => {
-  const { input, error } = parseInput(req.body);
+router.post('/', asyncRoute(async (req, res) => {
+  const { input, error } = await parseInput(req.body);
   if (!input) return void res.status(400).json({ error });
   const s = createScript(input);
   audit(req.user!.username, 'web', 'script.create', `/${s.command_name}`);
   discordBot.queueCommandRefresh();
   res.json({ script: withExtras(s.id) });
-});
+}));
 
-router.put('/:id', (req, res) => {
+router.put('/:id', asyncRoute(async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const prev = getScript(id);
   if (!prev) return void res.status(404).json({ error: 'Not found' });
-  const { input, error } = parseInput(req.body, id);
+  const { input, error } = await parseInput(req.body, id);
   if (!input) return void res.status(400).json({ error });
   updateScript(id, input);
   audit(req.user!.username, 'web', 'script.update', `/${input.command_name}`,
     prev.body !== input.body ? 'script body changed' : '');
   discordBot.queueCommandRefresh();
   res.json({ script: withExtras(id) });
-});
+}));
 
 router.put('/:id/grants', (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -96,6 +107,7 @@ router.put('/:id/grants', (req, res) => {
     .map((g: any) => ({ subject_type: g.subject_type, subject_id: String(g.subject_id), subject_name: String(g.subject_name || '').slice(0, 100) }));
   setScriptGrants(id, grants);
   audit(req.user!.username, 'web', 'script.grants', `/${s.command_name}`, `${grants.length} grants`);
+  discordBot.queueCommandRefresh(); // re-sync who can see the (hidden) command
   res.json({ grants: listScriptGrants(id) });
 });
 
@@ -114,8 +126,9 @@ router.post('/:id/run', (req, res) => {
   const s = getScript(parseInt(req.params.id, 10));
   if (!s) return void res.status(404).json({ error: 'Not found' });
   try {
-    const { runId, done } = runScript(s, { name: req.user!.username, id: `web:${req.user!.userId}`, source: 'web' });
-    done.then((r) => discordBot.postLog(`🛠️ **${req.user!.username}** (web) ran \`/${s.command_name}\` → **${r.status}** (run #${r.runId})`));
+    const options = typeof req.body?.options === 'object' && req.body.options ? req.body.options : {};
+    const { runId, done } = runScript(s, { name: req.user!.username, id: `web:${req.user!.userId}`, source: 'web' }, { options });
+    done.then((r) => discordBot.postRunLog(s, `**${req.user!.username}** (web)`, r));
     res.json({ runId });
   } catch (err: any) {
     res.status(409).json({ error: err?.message || String(err) });

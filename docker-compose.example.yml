@@ -14,7 +14,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/user/appdata/stormwarden:/app/data
-      # Same-path mount for script working directories (e.g. Frostgate's repo):
-      - /mnt/user/appdata/repos:/mnt/user/appdata/repos
-      # Optional: SSH key for `git pull` on private repos (read-only)
-      # - /mnt/user/appdata/stormwarden/ssh:/root/.ssh:ro
+      # Same-path mount: script working dirs (your compose projects) and Stormsmith's DB live here.
+      - /mnt/user/appdata:/mnt/user/appdata
+      # Only if your repos pull over SSH: Unraid's persistent root SSH keys (read-only)
+      # - /boot/config/ssh/root:/root/.ssh:ro

@@ -44,11 +44,10 @@ export function canRunScript(member: GuildMember, script: Script): boolean {
   return listScriptGrants(script.id).some((g) => matchesSubject(member, g));
 }
 
-/** A project with no grants is open to every member; otherwise a grant is required. */
+/** Requests are role-gated per project: no grants = admins only. */
 export function canRequest(member: GuildMember, project: VikunjaProjectMap): boolean {
   if (isWardenAdmin(member)) return true;
-  const grants = listProjectGrants(project.id);
-  return grants.length === 0 || grants.some((g) => matchesSubject(member, g));
+  return listProjectGrants(project.id).some((g) => matchesSubject(member, g));
 }
 
 export function projectsFor(member: GuildMember): VikunjaProjectMap[] {

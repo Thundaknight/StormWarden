@@ -5,6 +5,7 @@ import {
   setContainerGrants, updateContainer,
 } from '../db';
 import { getLogs, getStates, listAllContainers, performAction, type ContainerAction } from '../docker';
+import { getSelfContainerName, getStormsmithContainers, protectedMessage, protectedReason } from '../guard';
 import { asyncRoute } from './helpers';
 
 const router = Router();
@@ -21,9 +22,15 @@ router.get('/', asyncRoute(async (_req, res) => {
     dockerError = err?.message || String(err);
   }
   const grants = listContainerGrants();
+  const self = await getSelfContainerName();
+  const ss = getStormsmithContainers();
+  const reasons = new Map(managed.map((c) => [c.container_name,
+    c.container_name === self ? 'self' : ss.names.has(c.container_name) ? 'stormsmith' : null]));
   res.json({
     dockerError,
+    stormsmithError: ss.error,
     containers: managed.map((c) => ({
+      protected: reasons.get(c.container_name),
       ...c,
       state: states.get(c.container_name)?.state ?? 'not_found',
       status: states.get(c.container_name)?.status ?? '',
@@ -39,19 +46,30 @@ router.get('/', asyncRoute(async (_req, res) => {
 router.get('/available', asyncRoute(async (_req, res) => {
   const managed = new Set(listContainers().map((c) => c.container_name));
   const all = await listAllContainers();
-  res.json({ containers: all.map((c) => ({ ...c, managed: managed.has(c.name) })) });
+  const self = await getSelfContainerName();
+  const ss = getStormsmithContainers();
+  res.json({
+    stormsmithError: ss.error,
+    containers: all.map((c) => ({
+      ...c,
+      managed: managed.has(c.name),
+      protected: c.name === self ? 'self' : ss.names.has(c.name) ? 'stormsmith' : null,
+    })),
+  });
 }));
 
-router.post('/', (req, res) => {
+router.post('/', asyncRoute(async (req, res) => {
   const { container_name, display_name, description } = req.body || {};
   if (!container_name) return void res.status(400).json({ error: 'container_name is required' });
+  const reason = await protectedReason(String(container_name));
+  if (reason) return void res.status(403).json({ error: protectedMessage(reason, String(container_name)) });
   if (listContainers().some((c) => c.container_name === container_name)) {
     return void res.status(409).json({ error: 'That container is already managed' });
   }
   const c = addContainer(String(container_name), String(display_name || container_name).slice(0, 80), String(description || '').slice(0, 500));
   audit(req.user!.username, 'web', 'container.add', c.container_name);
   res.json({ container: c });
-});
+}));
 
 router.put('/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);

@@ -14,6 +14,9 @@ const FLAGS = [
 export default function Containers() {
   const [containers, setContainers] = useState<ManagedContainer[]>([]);
   const [dockerError, setDockerError] = useState('');
+  const [ssError, setSsError] = useState('');
+  const [ssPath, setSsPath] = useState('');
+  const [ssEditing, setSsEditing] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
@@ -21,8 +24,12 @@ export default function Containers() {
   const [logsFor, setLogsFor] = useState<ManagedContainer | null>(null);
 
   const load = useCallback(() => {
-    api.listContainers().then((r) => { setContainers(r.containers); setDockerError(r.dockerError); }).catch((e) => setError(e.message));
+    api.listContainers().then((r: any) => { setContainers(r.containers); setDockerError(r.dockerError); setSsError(r.stormsmithError || ''); }).catch((e) => setError(e.message));
   }, []);
+  useEffect(() => { api.getSettings().then((r) => setSsPath(r.settings.stormsmith_db_path)); }, []);
+  const saveSsPath = async () => {
+    try { await api.saveSettings({ stormsmith_db_path: ssPath }); setSsEditing(false); load(); } catch (e: any) { setError(e.message); }
+  };
   useEffect(() => {
     load();
     const t = setInterval(load, 10_000);
@@ -43,9 +50,21 @@ export default function Containers() {
           <h1>Containers</h1>
           <span className="muted">Containers StormWarden manages, and who in Discord can touch them.</span>
         </div>
-        <button className="btn btn-primary" onClick={() => setAdding(true)}>+ Add container</button>
+        <div className="btn-row">
+          <button className="btn btn-ghost btn-small" onClick={() => setSsEditing(!ssEditing)}>Stormsmith DB path</button>
+          <button className="btn btn-primary" onClick={() => setAdding(true)}>+ Add container</button>
+        </div>
       </div>
       {dockerError && <div className="alert alert-error">Docker unreachable: {dockerError}</div>}
+      {(ssError || ssEditing) && (
+        <div className="alert alert-warn">
+          {ssError && <div>Can't read Stormsmith's server list ({ssError}). Game servers it manages can't be recognised until this is fixed.</div>}
+          <div className="inline-form" style={{ marginTop: 8 }}>
+            <input className="mono" value={ssPath} onChange={(e) => setSsPath(e.target.value)} />
+            <button className="btn btn-small" onClick={saveSsPath}>Save path</button>
+          </div>
+        </div>
+      )}
       {error && <div className="alert alert-error">{error}</div>}
       {containers.length === 0 && !dockerError && (
         <div className="card empty-state muted">No containers yet. Add the ones you want Discord members to be able to manage.</div>
@@ -63,12 +82,17 @@ export default function Containers() {
               </div>
               <StatusBadge state={c.state} />
             </div>
+            {c.protected && (
+              <div className="alert alert-warn" style={{ margin: '8px 0 0' }}>
+                🔒 {c.protected === 'self' ? 'This is StormWarden itself — it can\'t control itself.' : 'Now managed by Stormsmith — locked here.'} Remove it from StormWarden.
+              </div>
+            )}
             {c.description && <p className="muted" style={{ margin: '8px 0 0' }}>{c.description}</p>}
             <div className="server-status-text muted">{c.status}</div>
             <div className="btn-row controls-row">
-              <button className="btn btn-small btn-success" disabled={busy === c.id || c.state === 'running'} onClick={() => act(c, 'start')}>Start</button>
-              <button className="btn btn-small" disabled={busy === c.id || c.state !== 'running'} onClick={() => act(c, 'restart')}>Restart</button>
-              <button className="btn btn-small btn-danger-outline" disabled={busy === c.id || c.state !== 'running'} onClick={() => act(c, 'stop')}>Stop</button>
+              <button className="btn btn-small btn-success" disabled={!!c.protected || busy === c.id || c.state === 'running'} onClick={() => act(c, 'start')}>Start</button>
+              <button className="btn btn-small" disabled={!!c.protected || busy === c.id || c.state !== 'running'} onClick={() => act(c, 'restart')}>Restart</button>
+              <button className="btn btn-small btn-danger-outline" disabled={!!c.protected || busy === c.id || c.state !== 'running'} onClick={() => act(c, 'stop')}>Stop</button>
               <button className="btn btn-small" onClick={() => setLogsFor(c)}>Logs</button>
               <button className="btn btn-small" onClick={() => setEditing(c)}>Access</button>
             </div>
@@ -117,14 +141,17 @@ function AddContainerModal({ onClose, onAdded }: { onClose: () => void; onAdded:
           <button
             key={c.name}
             className={`container-row${selected?.name === c.name ? ' selected' : ''}`}
-            disabled={c.managed}
+            disabled={c.managed || !!c.protected}
             onClick={() => { setSelected(c); setName(c.name); }}
           >
             <span>
               <span className="container-name">{c.name}</span>
-              <span className="hint">{c.image}{c.composeProject ? ` · compose: ${c.composeProject}` : ''}</span>
+              <span className="hint">
+                {c.protected === 'self' ? '🔒 StormWarden itself' : c.protected === 'stormsmith' ? '🔒 managed by Stormsmith'
+                  : c.managed ? 'already added' : `${c.image}${c.composeProject ? ` · compose: ${c.composeProject}` : ''}`}
+              </span>
             </span>
-            <StatusBadge state={c.managed ? 'created' : c.state} />
+            <StatusBadge state={c.state} />
           </button>
         ))}
       </div>

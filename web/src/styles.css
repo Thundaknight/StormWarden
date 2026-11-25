@@ -588,3 +588,5 @@ input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--accent);
 .pill-bad { color: var(--red); font-weight: 600; }
 .row-clickable { cursor: pointer; }
 .row-clickable:hover td { background: rgba(58, 168, 255, 0.05); }
+.option-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; margin-bottom: 10px; background: var(--bg-input); }
+.option-card input, .option-card textarea { background: var(--bg-raised); }

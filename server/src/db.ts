@@ -9,6 +9,11 @@ export const db = new Database(config.dbFile);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+function addColumn(table: string, column: string, def: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+}
+
 export function initDb(): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -131,6 +136,15 @@ export function initDb(): void {
     );
   `);
 
+  // Idempotent column migrations — add new columns here as well as to the CREATE TABLE above.
+  addColumn('users', 'discord_id', "TEXT NOT NULL DEFAULT ''");
+  addColumn('users', 'discord_username', "TEXT NOT NULL DEFAULT ''");
+  addColumn('scripts', 'options_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('vikunja_projects', 'container_id', 'INTEGER REFERENCES containers(id) ON DELETE SET NULL');
+  addColumn('vikunja_projects', 'label_ids', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('feature_requests', 'bucket_id', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('feature_requests', 'triage_message_id', "TEXT NOT NULL DEFAULT ''");
+
   // A run left 'running' means the process died mid-run (container restart). Close it out.
   db.prepare(`UPDATE script_runs SET status = 'error', finished_at = datetime('now'),
     output = output || '\n[StormWarden restarted while this run was in progress]'
@@ -151,6 +165,19 @@ export interface Settings {
   vikunja_url: string;
   vikunja_token: string;
   vikunja_sync_enabled: boolean;
+  /** How you reach the web UI, e.g. https://warden.local.stormconnect.ca — used for OAuth + links. */
+  web_base_url: string;
+  discord_client_secret: string;
+  /** Allow web sign-in with Discord (only for web users who linked their Discord account). */
+  discord_oauth_enabled: boolean;
+  /** Turn off username/password sign-in entirely (Discord sign-in only). */
+  password_login_disabled: boolean;
+  /** Who gets @-mentioned in the log channel when a script or container action fails. */
+  discord_failure_ping: { type: 'role' | 'user'; id: string; name: string } | null;
+  /** Stormsmith's SQLite file; containers it manages are off-limits to StormWarden. */
+  stormsmith_db_path: string;
+  /** OAuth token (scope applications.commands.permissions.update) used to sync who can see script commands. */
+  discord_perm_token: { access_token: string; refresh_token: string; expires_at: number; username: string } | null;
 }
 
 const SETTING_DEFAULTS: Settings = {
@@ -163,6 +190,13 @@ const SETTING_DEFAULTS: Settings = {
   vikunja_url: '',
   vikunja_token: '',
   vikunja_sync_enabled: true,
+  web_base_url: '',
+  discord_client_secret: '',
+  discord_oauth_enabled: false,
+  password_login_disabled: false,
+  discord_failure_ping: null,
+  stormsmith_db_path: '/mnt/user/appdata/stormsmith/stormsmith.db',
+  discord_perm_token: null,
 };
 
 export function getSettings(): Settings {
@@ -198,8 +232,18 @@ export function getUserById(id: number): User | undefined {
 export function getUserByUsername(username: string): User | undefined {
   return db.prepare('SELECT * FROM users WHERE username = ?').get(username) as User | undefined;
 }
+export function getUserByDiscordId(discordId: string): User | undefined {
+  if (!discordId) return undefined;
+  return db.prepare('SELECT * FROM users WHERE discord_id = ?').get(discordId) as User | undefined;
+}
 export function listUsers(): Array<Omit<User, 'password_hash'>> {
-  return db.prepare('SELECT id, username, role, created_at FROM users ORDER BY id').all() as any;
+  return db.prepare('SELECT id, username, role, discord_id, discord_username, created_at FROM users ORDER BY id').all() as any;
+}
+export function setUserDiscord(id: number, discordId: string, discordUsername: string): void {
+  db.prepare('UPDATE users SET discord_id = ?, discord_username = ? WHERE id = ?').run(discordId, discordUsername, id);
+}
+export function countDiscordLinkedUsers(): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM users WHERE discord_id != ''").get() as { n: number }).n;
 }
 export function createUser(username: string, passwordHash: string): User {
   const r = db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)').run(username, passwordHash, 'admin');
@@ -267,19 +311,19 @@ export function getScriptByCommand(name: string): Script | undefined {
 }
 
 export type ScriptInput = Pick<Script, 'command_name' | 'description' | 'container_id' | 'working_dir' | 'body'
-  | 'timeout_sec' | 'require_confirm' | 'ephemeral_output' | 'enabled'>;
+  | 'timeout_sec' | 'require_confirm' | 'ephemeral_output' | 'enabled' | 'options_json'>;
 
 export function createScript(s: ScriptInput): Script {
   const r = db.prepare(`INSERT INTO scripts
-    (command_name, description, container_id, working_dir, body, timeout_sec, require_confirm, ephemeral_output, enabled)
-    VALUES (@command_name, @description, @container_id, @working_dir, @body, @timeout_sec, @require_confirm, @ephemeral_output, @enabled)`)
+    (command_name, description, container_id, working_dir, body, timeout_sec, require_confirm, ephemeral_output, enabled, options_json)
+    VALUES (@command_name, @description, @container_id, @working_dir, @body, @timeout_sec, @require_confirm, @ephemeral_output, @enabled, @options_json)`)
     .run(s);
   return getScript(Number(r.lastInsertRowid))!;
 }
 export function updateScript(id: number, s: ScriptInput): Script {
   db.prepare(`UPDATE scripts SET command_name = @command_name, description = @description, container_id = @container_id,
     working_dir = @working_dir, body = @body, timeout_sec = @timeout_sec, require_confirm = @require_confirm,
-    ephemeral_output = @ephemeral_output, enabled = @enabled, updated_at = datetime('now') WHERE id = @id`)
+    ephemeral_output = @ephemeral_output, enabled = @enabled, options_json = @options_json, updated_at = datetime('now') WHERE id = @id`)
     .run({ ...s, id });
   return getScript(id)!;
 }
@@ -337,15 +381,16 @@ export function getProjectMap(id: number): VikunjaProjectMap | undefined {
 export function getProjectMapByKey(key: string): VikunjaProjectMap | undefined {
   return db.prepare('SELECT * FROM vikunja_projects WHERE key = ?').get(key) as VikunjaProjectMap | undefined;
 }
-export type ProjectMapInput = Pick<VikunjaProjectMap, 'key' | 'display_name' | 'vikunja_project_id' | 'channel_id' | 'enabled'>;
+export type ProjectMapInput = Pick<VikunjaProjectMap, 'key' | 'display_name' | 'vikunja_project_id' | 'channel_id' | 'enabled'
+  | 'container_id' | 'label_ids'>;
 export function createProjectMap(p: ProjectMapInput): VikunjaProjectMap {
-  const r = db.prepare(`INSERT INTO vikunja_projects (key, display_name, vikunja_project_id, channel_id, enabled)
-    VALUES (@key, @display_name, @vikunja_project_id, @channel_id, @enabled)`).run(p);
+  const r = db.prepare(`INSERT INTO vikunja_projects (key, display_name, vikunja_project_id, channel_id, enabled, container_id, label_ids)
+    VALUES (@key, @display_name, @vikunja_project_id, @channel_id, @enabled, @container_id, @label_ids)`).run(p);
   return getProjectMap(Number(r.lastInsertRowid))!;
 }
 export function updateProjectMap(id: number, p: ProjectMapInput): VikunjaProjectMap {
   db.prepare(`UPDATE vikunja_projects SET key = @key, display_name = @display_name, vikunja_project_id = @vikunja_project_id,
-    channel_id = @channel_id, enabled = @enabled WHERE id = @id`).run({ ...p, id });
+    channel_id = @channel_id, enabled = @enabled, container_id = @container_id, label_ids = @label_ids WHERE id = @id`).run({ ...p, id });
   return getProjectMap(id)!;
 }
 export function deleteProjectMap(id: number): void {
@@ -366,13 +411,20 @@ export function setProjectGrants(projectMapId: number, grants: SubjectRef[]): vo
 
 // ---------- feature requests ----------
 
-export function createRequest(r: Omit<FeatureRequest, 'id' | 'done' | 'created_at'>): FeatureRequest {
+export function createRequest(r: Omit<FeatureRequest, 'id' | 'done' | 'created_at' | 'bucket_id' | 'triage_message_id'>): FeatureRequest {
   const res = db.prepare(`INSERT INTO feature_requests (project_map_id, vikunja_task_id, thread_id, requester_id, requester_name, title)
     VALUES (@project_map_id, @vikunja_task_id, @thread_id, @requester_id, @requester_name, @title)`).run(r);
   return db.prepare('SELECT * FROM feature_requests WHERE id = ?').get(Number(res.lastInsertRowid)) as FeatureRequest;
 }
 export function setRequestThread(id: number, threadId: string): void {
   db.prepare('UPDATE feature_requests SET thread_id = ? WHERE id = ?').run(threadId, id);
+}
+export function getRequest(id: number): FeatureRequest | undefined {
+  return db.prepare('SELECT * FROM feature_requests WHERE id = ?').get(id) as FeatureRequest | undefined;
+}
+export function setRequestTriage(id: number, patch: { bucket_id?: number; triage_message_id?: string }): void {
+  if (patch.bucket_id !== undefined) db.prepare('UPDATE feature_requests SET bucket_id = ? WHERE id = ?').run(patch.bucket_id, id);
+  if (patch.triage_message_id !== undefined) db.prepare('UPDATE feature_requests SET triage_message_id = ? WHERE id = ?').run(patch.triage_message_id, id);
 }
 export function setRequestDone(id: number, done: boolean): void {
   db.prepare('UPDATE feature_requests SET done = ? WHERE id = ?').run(done ? 1 : 0, id);

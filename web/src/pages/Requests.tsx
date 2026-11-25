@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import GrantEditor from '../components/GrantEditor';
 import Modal from '../components/Modal';
-import type { FeatureRequest, ProjectMap, Settings, SubjectRef, VikunjaProject } from '../types';
+import type { FeatureRequest, ManagedContainer, ProjectMap, Settings, SubjectRef, VikunjaLabel, VikunjaProject } from '../types';
 import { useGuildMeta } from '../useGuildMeta';
 import { fmtTime } from '../format';
 
@@ -15,6 +15,8 @@ export default function Requests() {
   const [maps, setMaps] = useState<ProjectMap[]>([]);
   const [vprojects, setVprojects] = useState<VikunjaProject[]>([]);
   const [requests, setRequests] = useState<FeatureRequest[]>([]);
+  const [containers, setContainers] = useState<ManagedContainer[]>([]);
+  const [labels, setLabels] = useState<VikunjaLabel[]>([]);
   const [editing, setEditing] = useState<Partial<ProjectMap> | null>(null);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
@@ -23,6 +25,8 @@ export default function Requests() {
     api.listProjectMaps().then((r) => setMaps(r.projects));
     api.listRequests().then((r) => setRequests(r.requests));
     api.vikunjaProjects().then((r) => setVprojects(r.projects)).catch(() => setVprojects([]));
+    api.vikunjaLabels().then((r) => setLabels(r.labels)).catch(() => setLabels([]));
+    api.listContainers().then((r) => setContainers(r.containers)).catch(() => {});
   }, []);
   useEffect(load, [load]);
 
@@ -74,18 +78,19 @@ export default function Requests() {
       <div className="card">
         <div className="card-head-row">
           <h2 style={{ margin: 0 }}>Request projects</h2>
-          <button className="btn btn-primary btn-small" onClick={() => setEditing({ key: '', display_name: '', vikunja_project_id: 0, channel_id: '', enabled: 1, grants: [] })}>+ Add project</button>
+          <button className="btn btn-primary btn-small" onClick={() => setEditing({ key: '', display_name: '', vikunja_project_id: 0, channel_id: '', enabled: 1, grants: [], container_id: null, label_ids: [] })}>+ Add project</button>
         </div>
-        {maps.length === 0 ? <p className="muted">No projects yet. Map a Discord-facing name to a Vikunja project.</p> : (
+        {maps.length === 0 ? <p className="muted">No projects yet. Give each container its own request project, linked to a Vikunja project.</p> : (
           <table className="table">
-            <thead><tr><th>Name</th><th>Vikunja project</th><th>Thread channel</th><th>Who can request</th><th /></tr></thead>
+            <thead><tr><th>Name</th><th>Container</th><th>Vikunja project</th><th>Thread channel</th><th>Who can request</th><th /></tr></thead>
             <tbody>
               {maps.map((p) => (
                 <tr key={p.id}>
                   <td><strong>{p.display_name}</strong> <span className="muted mono">[{p.key}]</span>{!p.enabled && <span className="muted"> (disabled)</span>}</td>
+                  <td>{containers.find((c) => c.id === p.container_id)?.display_name || <span className="muted">—</span>}</td>
                   <td>{vprojects.find((v) => v.id === p.vikunja_project_id)?.title || `#${p.vikunja_project_id}`}</td>
                   <td>{p.channel_id ? `#${channelName(p.channel_id) || p.channel_id}` : <span className="muted">where /request is used</span>}</td>
-                  <td>{p.grants.length ? p.grants.map((g) => (g.subject_type === 'role' ? '@' : '👤') + (g.subject_name || g.subject_id)).join(', ') : <span className="muted">everyone</span>}</td>
+                  <td>{p.grants.length ? p.grants.map((g) => (g.subject_type === 'role' ? '@' : '👤') + (g.subject_name || g.subject_id)).join(', ') : <span className="muted">admins only</span>}</td>
                   <td className="table-actions"><button className="btn btn-small" onClick={() => setEditing(p)}>Edit</button></td>
                 </tr>
               ))}
@@ -116,7 +121,8 @@ export default function Requests() {
 
       {editing && (
         <ProjectModal
-          initial={editing} vprojects={vprojects} meta={meta}
+          initial={editing} vprojects={vprojects} meta={meta} containers={containers} labels={labels}
+          takenContainers={maps.filter((m) => m.id !== editing.id && m.container_id).map((m) => m.container_id!)}
           onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }}
         />
       )}
@@ -124,8 +130,9 @@ export default function Requests() {
   );
 }
 
-function ProjectModal({ initial, vprojects, meta, onClose, onSaved }: {
+function ProjectModal({ initial, vprojects, meta, containers, labels, takenContainers, onClose, onSaved }: {
   initial: Partial<ProjectMap>; vprojects: VikunjaProject[]; meta: ReturnType<typeof useGuildMeta>['meta'];
+  containers: ManagedContainer[]; labels: VikunjaLabel[]; takenContainers: number[];
   onClose: () => void; onSaved: () => void;
 }) {
   const [p, setP] = useState({ ...initial });
@@ -150,6 +157,20 @@ function ProjectModal({ initial, vprojects, meta, onClose, onSaved }: {
     <Modal title={p.id ? `Edit ${p.display_name}` : 'Add request project'} onClose={onClose} wide>
       {error && <div className="alert alert-error">{error}</div>}
       <div className="form-grid">
+        <label className="span-2">Container
+          <select value={p.container_id || ''} onChange={(e) => {
+            const c = containers.find((x) => x.id === parseInt(e.target.value, 10));
+            set('container_id', c?.id || null);
+            if (c) {
+              set('display_name', c.display_name);
+              set('key', c.container_name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24));
+            }
+          }}>
+            <option value="">— not tied to a container —</option>
+            {containers.filter((c) => !takenContainers.includes(c.id)).map((c) => <option key={c.id} value={c.id}>{c.display_name} ({c.container_name})</option>)}
+          </select>
+          <span className="hint">Each container gets its own request project; members pick it by name in <span className="mono">/request</span>.</span>
+        </label>
         <label>Vikunja project
           <select value={p.vikunja_project_id || ''} onChange={(e) => {
             const v = vprojects.find((x) => x.id === parseInt(e.target.value, 10));
@@ -174,8 +195,24 @@ function ProjectModal({ initial, vprojects, meta, onClose, onSaved }: {
         </label>
       </div>
       <label className="checkbox-label"><input type="checkbox" checked={!!p.enabled} onChange={(e) => set('enabled', e.target.checked ? 1 : 0)} /> Enabled</label>
+      <h2>Triage labels</h2>
+      <p className="hint" style={{ marginTop: -6, marginBottom: 10 }}>
+        Labels offered in the thread's triage dropdown (max 25). None selected = all labels the StormWarden Vikunja user can see (first 25).
+      </p>
+      <div className="chip-list" style={{ marginBottom: 14 }}>
+        {labels.length === 0 && <span className="muted">No labels visible to the API user.</span>}
+        {labels.map((l) => {
+          const on = (p.label_ids || []).includes(l.id);
+          return (
+            <button key={l.id} className={`chip${on ? ' chip-on' : ''}`}
+              onClick={() => set('label_ids', on ? (p.label_ids || []).filter((x) => x !== l.id) : [...(p.label_ids || []), l.id])}>
+              {l.title}
+            </button>
+          );
+        })}
+      </div>
       <h2>Who can request</h2>
-      <p className="hint" style={{ marginTop: -6, marginBottom: 10 }}>Leave empty to let every member use it.</p>
+      <p className="hint" style={{ marginTop: -6, marginBottom: 10 }}>Pick the roles (or people) allowed to file requests for this project. Empty = Warden admins only.</p>
       <GrantEditor grants={grants as any} onChange={(g) => setGrants(g as any)} meta={meta} />
       <hr className="divider" />
       <div className="btn-row" style={{ justifyContent: 'space-between' }}>
