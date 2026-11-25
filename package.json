@@ -1,0 +1,16 @@
+{
+  "name": "stormwarden",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StormWarden - Discord-driven Docker manager for StormTower: role-gated container control, admin-defined script slash commands, and Vikunja feature requests",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w web && npm run build -w server",
+    "start": "node server/dist/index.js"
+  }
+}
