@@ -5,7 +5,8 @@ import {
 import type { ManagedContainer, Script, SubjectRef, VikunjaProjectMap } from '../types';
 
 /**
- * Discord-side access model.
+ * Discord-side access model. Members can only view status and start/stop/restart containers;
+ * anything beyond that (rebuilds, pulls, …) has to be an admin-authored script command.
  *
  * - "Warden admins" bypass every check: anyone with Discord's Administrator permission, the guild
  *   owner, or a member holding one of the roles listed in Settings → Discord → Admin roles.
@@ -25,14 +26,12 @@ export function matchesSubject(member: GuildMember, s: SubjectRef): boolean {
   return member.roles.cache.has(s.subject_id);
 }
 
-export type ContainerPerm = 'view' | 'control' | 'logs';
+export type ContainerPerm = 'view' | 'control';
 
 export function canContainer(member: GuildMember, containerId: number, kind: ContainerPerm): boolean {
   if (isWardenAdmin(member)) return true;
   return listContainerGrants(containerId).some((g) => matchesSubject(member, g) && (
-    kind === 'view' ? !!(g.can_view || g.can_control || g.can_logs)
-      : kind === 'control' ? !!g.can_control
-        : !!g.can_logs
+    kind === 'view' ? !!(g.can_view || g.can_control) : !!g.can_control
   ));
 }
 

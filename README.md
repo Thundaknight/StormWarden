@@ -2,7 +2,7 @@
 
 StormWarden is Stormsmith's partner. Stormsmith runs the game servers. StormWarden handles **everything else on StormTower**: bots, tools and services, operated from Discord by the people you choose.
 
-- **Container control from Discord.** Members get `/docker status|start|stop|restart|logs`. They only see the containers they've been granted, and only the actions you allowed (view, control, logs).
+- **Container control from Discord.** Members get `/docker status|start|stop|restart`, and only for the containers they've been granted. Containers are always set up beforehand on Unraid (plain Docker or Compose). StormWarden never creates or reconfigures them from Discord, and container logs are only visible in the web panel. Anything beyond start/stop/restart, like pulling or rebuilding, has to be a script command you wrote.
 - **Your scripts as slash commands.** Write a script in the web UI, such as `git pull` + `docker compose -p frostgate up -d --build`. Give it a name like `updatefrostgate` and it becomes `/updatefrostgate` in Discord. Output streams live into an embed, and every run is logged with full output.
 - **Feature requests into Vikunja.** `/request <project>` opens a form, files a task in the mapped Vikunja project, and starts a Discord thread. Thread replies become Vikunja comments, and Vikunja comments get posted back into the thread. When the task is marked done, the thread gets a closing note and is archived.
 - **Web control panel** for you. Manage containers, per-role and per-user grants, scripts and their run history, request projects, Discord bot settings, web users, and an audit log of who did what.
@@ -17,7 +17,7 @@ Same stack and look as Stormsmith: Node 22 + TypeScript + Express + better-sqlit
 | **Warden admins in Discord** (Administrator permission, the server owner, or a role you pick under *Discord Bot → Warden admins*) | Every container action, every script, every request project. |
 | **Everyone else in Discord** | Only what a **grant** gives them. A grant targets a **role** (anyone holding it) or a **single user**. |
 
-Grants are set per container (**View**, **Start/Stop/Restart**, **Logs**), per script (allowed or not), and per request project. A request project with no grants is open to every member. Grants add up: one matching grant is enough.
+Grants are set per container (**View** or **Start/Stop/Restart**), per script (allowed or not), and per request project. A request project with no grants is open to every member. Grants add up: one matching grant is enough.
 
 ## Scripts: how they run
 

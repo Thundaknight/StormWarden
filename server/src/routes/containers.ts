@@ -71,7 +71,7 @@ router.put('/:id/grants', (req, res) => {
     .filter((g: any) => isSubjectType(g?.subject_type) && /^\d{15,22}$/.test(String(g?.subject_id || '')))
     .map((g: any) => ({
       subject_type: g.subject_type, subject_id: String(g.subject_id), subject_name: String(g.subject_name || '').slice(0, 100),
-      can_view: !!g.can_view, can_control: !!g.can_control, can_logs: !!g.can_logs,
+      can_view: !!g.can_view, can_control: !!g.can_control, can_logs: false,
     }));
   setContainerGrants(id, clean);
   audit(req.user!.username, 'web', 'container.grants', c.container_name, `${clean.length} grants`);

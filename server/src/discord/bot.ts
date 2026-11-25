@@ -7,7 +7,7 @@ import {
 import {
   audit, getContainer, getProjectMap, getScript, getScriptByCommand, getSettings, listScripts,
 } from '../db';
-import { getLogs, getStates, getUptimeStart, performAction, type ContainerAction, type ContainerState } from '../docker';
+import { getStates, getUptimeStart, performAction, type ContainerAction, type ContainerState } from '../docker';
 import { isScriptRunning, runScript, type RunResult } from '../scriptRunner';
 import type { Script } from '../types';
 import { canContainer, canRequest, canRunScript, containersFor, projectsFor } from './perms';
@@ -175,10 +175,7 @@ class DiscordBot {
         .addStringOption((o) => o.setName('container').setDescription('A specific container (leave empty for all)').setAutocomplete(true)))
       .addSubcommand((sc) => sc.setName('start').setDescription('Start a container').addStringOption((o) => containerOpt(o)))
       .addSubcommand((sc) => sc.setName('stop').setDescription('Stop a container').addStringOption((o) => containerOpt(o)))
-      .addSubcommand((sc) => sc.setName('restart').setDescription('Restart a container').addStringOption((o) => containerOpt(o)))
-      .addSubcommand((sc) => sc.setName('logs').setDescription('Show recent container logs')
-        .addStringOption((o) => containerOpt(o))
-        .addIntegerOption((o) => o.setName('lines').setDescription('How many lines (default 50, max 300)').setMinValue(1).setMaxValue(300)));
+      .addSubcommand((sc) => sc.setName('restart').setDescription('Restart a container').addStringOption((o) => containerOpt(o)));
 
     const request = new SlashCommandBuilder()
       .setName('request')
@@ -229,7 +226,7 @@ class DiscordBot {
 
     if (i.commandName === 'docker' && focused.name === 'container') {
       const sub = i.options.getSubcommand();
-      const kind = sub === 'logs' ? 'logs' : sub === 'status' ? 'view' : 'control';
+      const kind = sub === 'status' ? 'view' : 'control';
       const list = containersFor(member, kind)
         .filter((c) => !q || c.display_name.toLowerCase().includes(q) || c.container_name.toLowerCase().includes(q))
         .slice(0, 25)
@@ -287,23 +284,6 @@ class DiscordBot {
     }
 
     if (!container) return void i.reply({ content: 'Pick a container.', ephemeral: true });
-
-    if (sub === 'logs') {
-      if (!canContainer(member, container.id, 'logs')) return void this.denied(i);
-      await i.deferReply({ ephemeral: true });
-      const lines = i.options.getInteger('lines') ?? 50;
-      try {
-        const logs = await getLogs(container.container_name, lines);
-        audit(member.user.username, 'discord', 'container.logs', container.container_name, `${lines} lines`);
-        if (logs.length > 1800) {
-          const file = new AttachmentBuilder(Buffer.from(logs, 'utf8'), { name: `${container.container_name}.log` });
-          return void i.editReply({ content: `Last ${lines} lines of **${container.display_name}**:`, files: [file] });
-        }
-        return void i.editReply({ content: `Last ${lines} lines of **${container.display_name}**:\n${codeBlock(logs, 1850)}` });
-      } catch (err: any) {
-        return void i.editReply({ content: `❌ Could not read logs: ${err?.message || err}` });
-      }
-    }
 
     // start / stop / restart
     if (!canContainer(member, container.id, 'control')) return void this.denied(i);

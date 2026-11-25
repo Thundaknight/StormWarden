@@ -9,7 +9,6 @@ import { useGuildMeta } from '../useGuildMeta';
 const FLAGS = [
   { key: 'can_view', label: 'View' },
   { key: 'can_control', label: 'Start/Stop/Restart' },
-  { key: 'can_logs', label: 'Logs' },
 ];
 
 export default function Containers() {
@@ -78,7 +77,7 @@ export default function Containers() {
               {c.grants.map((g) => (
                 <span key={g.subject_type + g.subject_id} className={g.subject_type === 'role' ? 'role-pill' : 'user-pill'}>
                   {g.subject_type === 'role' ? '@' : '👤 '}{g.subject_name || g.subject_id}
-                  <span className="flag-tags">{[g.can_control && 'ctl', g.can_logs && 'logs'].filter(Boolean).join(' · ') || 'view'}</span>
+                  <span className="flag-tags">{g.can_control ? 'start/stop/restart' : 'view'}</span>
                 </span>
               ))}
             </div>
@@ -169,7 +168,8 @@ function AccessModal({ container, onClose, onSaved }: { container: ManagedContai
       </div>
       <h2>Discord access</h2>
       <p className="hint" style={{ marginTop: -6, marginBottom: 10 }}>
-        Discord admins (Administrator permission, the server owner, or a Warden admin role) always have full access.
+        View = see it in <span className="mono">/docker status</span>. Start/Stop/Restart = those three actions only — rebuilds and pulls need a script command.
+        Discord admins (Administrator permission, the server owner, or a Warden admin role) always have full access. Logs are web-only.
       </p>
       <GrantEditor grants={grants as any} onChange={(g) => setGrants(g as any)} meta={meta} flags={FLAGS} defaultFlags={{ can_view: true }} />
       <hr className="divider" />

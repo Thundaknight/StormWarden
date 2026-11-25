@@ -94,7 +94,7 @@ export default function Discord() {
       <div className="card" style={{ marginTop: 16 }}>
         <h2>Commands members get</h2>
         <ul className="muted" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
-          <li><span className="mono">/docker status [container]</span> · <span className="mono">start</span> · <span className="mono">stop</span> · <span className="mono">restart</span> · <span className="mono">logs</span> — filtered to containers they're granted</li>
+          <li><span className="mono">/docker status [container]</span> · <span className="mono">start</span> · <span className="mono">stop</span> · <span className="mono">restart</span> — filtered to containers they're granted (logs stay web-only)</li>
           <li><span className="mono">/request &lt;project&gt;</span> — opens a form, files a Vikunja task, starts a synced thread</li>
           <li>One command per enabled script, e.g. <span className="mono">/updatefrostgate</span></li>
         </ul>
