@@ -327,6 +327,7 @@ input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--accent);
   position: fixed;
   inset: 0 0 0 230px;
   z-index: 0;
+  pointer-events: none;
   opacity: 0.35;
   background-color: transparent;
   background-image:
@@ -337,7 +338,7 @@ input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--accent);
   background-size: 100% 100%, 100% 100%, 900px 900px, 700px 700px;
   background-position: center, center, -100px -80px, 400px 200px;
 }
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   .dashboard-bg { inset: 0; }
 }
 .login-screen .version-footer {
@@ -552,7 +553,7 @@ input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--accent);
 
 @media (max-width: 760px) {
   .layout { flex-direction: column; }
-  .sidebar { width: 100%; height: auto; position: static; }
+  .sidebar { width: 100%; height: auto; position: relative; z-index: 2; }
   .content { padding: 18px; }
   .form-grid { grid-template-columns: 1fr; }
   .form-grid .span-2 { grid-column: span 1; }
@@ -590,3 +591,20 @@ input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--accent);
 .row-clickable:hover td { background: rgba(58, 168, 255, 0.05); }
 .option-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; margin-bottom: 10px; background: var(--bg-input); }
 .option-card input, .option-card textarea { background: var(--bg-raised); }
+
+/* ---- Overflow guards (narrow screens) ---- */
+/* Grid/flex children default to min-width:auto, so one long unbreakable string
+   (e.g. the OAuth redirect URL) or an input's intrinsic width widens the whole
+   column past its card. */
+.content { min-width: 0; }
+.form-grid > * { min-width: 0; }
+.inline-form input, .grant-add-row input, .grant-add-row select { min-width: 0; }
+.hint, .alert { overflow-wrap: anywhere; }
+.login-card { max-width: 100%; }
+@media (max-width: 760px) {
+  .inline-form, .grant-add-row { flex-wrap: wrap; }
+  .inline-form input, .grant-add-row input, .grant-add-row select { flex: 1 1 140px; }
+  /* Tables scroll sideways inside their card instead of pushing it wider. */
+  .table { display: block; overflow-x: auto; }
+  .table-actions .btn { white-space: nowrap; }
+}
