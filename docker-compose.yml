@@ -1,10 +1,13 @@
+name: stormwarden
 # Example deployment on StormTower (Unraid). Adjust the repo path mount to wherever
 # your compose projects live. The host path and container path MUST be identical so
 # that `docker compose` (which talks to the host's Docker daemon) resolves relative
 # build contexts and bind mounts to the right place on the host.
 services:
   stormwarden:
-    image: thundaknight/stormwarden:latest
+    build: /mnt/user/appdata/repos/stormwarden
+    image: stormwarden:local
+    pull_policy: build
     container_name: stormwarden
     restart: unless-stopped
     ports:
@@ -14,7 +17,4 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/user/appdata/stormwarden:/app/data
-      # Same-path mount: script working dirs (your compose projects) and Stormsmith's DB live here.
       - /mnt/user/appdata:/mnt/user/appdata
-      # Only if your repos pull over SSH: Unraid's persistent root SSH keys (read-only)
-      # - /boot/config/ssh/root:/root/.ssh:ro
