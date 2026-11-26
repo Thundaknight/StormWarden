@@ -4,6 +4,7 @@ import {
   audit, createProjectMap, getContainer, deleteProjectMap, getProjectMap, getProjectMapByKey, isSubjectType, listProjectGrants,
   listProjectMaps, listRequests, setProjectGrants, updateProjectMap, type ProjectMapInput,
 } from '../db';
+import { discordBot } from '../discord/bot';
 import { requestSync } from '../discord/requests';
 import { vikunja } from '../vikunja';
 import { asyncRoute } from './helpers';
@@ -75,6 +76,7 @@ router.put('/projects/:id', (req, res) => {
   const { input, error } = parse(req.body, id);
   if (!input) return void res.status(400).json({ error });
   res.json({ project: updateProjectMap(id, input) });
+  discordBot.queueCommandRefresh(); // enabling/disabling a project changes who sees /request
 });
 
 router.put('/projects/:id/grants', (req, res) => {
@@ -86,6 +88,7 @@ router.put('/projects/:id/grants', (req, res) => {
     .map((g: any) => ({ subject_type: g.subject_type, subject_id: String(g.subject_id), subject_name: String(g.subject_name || '').slice(0, 100) }));
   setProjectGrants(id, grants);
   audit(req.user!.username, 'web', 'request-project.grants', p.display_name, `${grants.length} grants`);
+  discordBot.queueCommandRefresh(); // grants decide who sees /request
   res.json({ grants: listProjectGrants(id) });
 });
 
@@ -95,6 +98,7 @@ router.delete('/projects/:id', (req, res) => {
   if (!p) return void res.status(404).json({ error: 'Not found' });
   deleteProjectMap(id);
   audit(req.user!.username, 'web', 'request-project.delete', p.display_name);
+  discordBot.queueCommandRefresh();
   res.json({ ok: true });
 });
 

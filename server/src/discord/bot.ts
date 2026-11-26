@@ -6,13 +6,14 @@ import {
 } from 'discord.js';
 import crypto from 'crypto';
 import {
-  audit, getContainer, getProjectMap, getScript, getScriptByCommand, getSettings, listScriptGrants, listScripts,
+  audit, getContainer, getProjectMap, getScript, getScriptByCommand, getSettings, listContainerGrants, listProjectGrants,
+  listProjectMaps, listScriptGrants, listScripts,
 } from '../db';
 import { getPermAccessToken } from '../discordOAuth';
 import { getSelfContainerName, getStormsmithContainers } from '../guard';
 import { getStates, getUptimeStart, performAction, type ContainerAction, type ContainerState } from '../docker';
-import { isScriptRunning, parseOptions, runScript, type RunResult } from '../scriptRunner';
-import type { Script } from '../types';
+import { isScriptRunning, parseOptions, RESERVED_COMMANDS, runScript, type RunResult } from '../scriptRunner';
+import type { Script, SubjectRef } from '../types';
 import { canContainer, canRequest, canRunScript, containersFor, isWardenAdmin, projectsFor } from './perms';
 import { requestSync } from './requests';
 
@@ -56,6 +57,8 @@ class DiscordBot {
   lastError = '';
   /** Result of the last script-command visibility sync, shown on the Discord page. */
   permSync = { ok: false, message: 'Not synced yet', at: '' };
+  /** Enabled scripts whose command name is now built-in; left unregistered. */
+  private shadowedScripts: string[] = [];
   private commandRefreshTimer: NodeJS.Timeout | null = null;
   private pending = new Map<string, PendingRun>();
 
@@ -180,12 +183,20 @@ class DiscordBot {
     const containerOpt = (o: any, desc = 'Container') =>
       o.setName('container').setDescription(desc).setRequired(true).setAutocomplete(true);
 
-    const docker = new SlashCommandBuilder()
-      .setName('docker')
-      .setDescription('Manage StormTower containers you have access to')
+    // Every command is hidden (default_member_permissions = 0) and revealed per role/user by
+    // syncCommandPermissions(). Discord can't hide subcommands, so status and control are separate.
+    const status = new SlashCommandBuilder()
+      .setName('status')
+      .setDescription('Show the status of StormTower containers you have access to')
       .setDMPermission(false)
-      .addSubcommand((sc) => sc.setName('status').setDescription('Show container status')
-        .addStringOption((o) => o.setName('container').setDescription('A specific container (leave empty for all)').setAutocomplete(true)))
+      .setDefaultMemberPermissions(0)
+      .addStringOption((o) => o.setName('container').setDescription('A specific container (leave empty for all)').setAutocomplete(true));
+
+    const control = new SlashCommandBuilder()
+      .setName('control')
+      .setDescription('Start, stop or restart StormTower containers you have access to')
+      .setDMPermission(false)
+      .setDefaultMemberPermissions(0)
       .addSubcommand((sc) => sc.setName('start').setDescription('Start a container').addStringOption((o) => containerOpt(o)))
       .addSubcommand((sc) => sc.setName('stop').setDescription('Stop a container').addStringOption((o) => containerOpt(o)))
       .addSubcommand((sc) => sc.setName('restart').setDescription('Restart a container').addStringOption((o) => containerOpt(o)));
@@ -194,11 +205,14 @@ class DiscordBot {
       .setName('request')
       .setDescription('Request a feature or report an issue for a project')
       .setDMPermission(false)
+      .setDefaultMemberPermissions(0)
       .addStringOption((o) => o.setName('project').setDescription('Which project').setRequired(true).setAutocomplete(true));
 
-    // Script commands are hidden from everyone but Discord admins (default_member_permissions = 0);
-    // syncCommandPermissions() then reveals each one to exactly the roles/users granted in the web UI.
-    const scriptCmds = listScripts().filter((sc) => sc.enabled).map((sc) => {
+    // A script saved under a name that later became built-in would make Discord reject the whole
+    // registration, so skip it (the sync status on the Discord page says so).
+    const scripts = listScripts().filter((sc) => sc.enabled);
+    this.shadowedScripts = scripts.filter((sc) => RESERVED_COMMANDS.has(sc.command_name)).map((sc) => sc.command_name);
+    const scriptCmds = scripts.filter((sc) => !RESERVED_COMMANDS.has(sc.command_name)).map((sc) => {
       const b = new SlashCommandBuilder()
         .setName(sc.command_name)
         .setDescription((sc.description || `Run the ${sc.command_name} script`).slice(0, 100))
@@ -212,7 +226,7 @@ class DiscordBot {
       return b;
     });
 
-    const body = [docker, request, ...scriptCmds].map((c) => c.toJSON());
+    const body = [status, control, request, ...scriptCmds].map((c) => c.toJSON());
     const rest = new REST({ version: '10' }).setToken(s.discord_bot_token);
     const registered = await rest.put(Routes.applicationGuildCommands(this.client.application.id, s.discord_guild_id), { body }) as Array<{ id: string; name: string }>;
     console.log(`[discord] registered ${body.length} guild commands`);
@@ -220,27 +234,44 @@ class DiscordBot {
   }
 
   /**
-   * Makes each hidden script command visible to the roles/users granted it (plus Warden admin roles).
-   * Discord only accepts this from a guild manager's OAuth token with the
-   * applications.commands.permissions.update scope — authorised once from the Discord page.
+   * Makes each hidden command visible to exactly who may use it, plus the Warden admin roles:
+   * /status → any container grant, /control → Start/Stop/Restart grants, /request → grants on
+   * enabled request projects, scripts → their own grants. Discord only accepts this from a guild
+   * manager's OAuth token with the applications.commands.permissions.update scope, authorised once
+   * from the Discord page. Without it every command stays visible to Discord admins only.
    */
   private async syncCommandPermissions(registered: Array<{ id: string; name: string }>): Promise<void> {
     const s = getSettings();
     const at = new Date().toISOString();
+    const skipped = this.shadowedScripts.length
+      ? ` Skipped script${this.shadowedScripts.length === 1 ? '' : 's'} ${this.shadowedScripts.map((n) => `/${n}`).join(', ')}: name is now a built-in command, rename ${this.shadowedScripts.length === 1 ? 'it' : 'them'}.`
+      : '';
     const token = await getPermAccessToken();
     if (!token) {
-      this.permSync = { ok: false, at, message: 'Not authorised — script commands are visible to Discord admins only until you authorise command-permission sync.' };
+      this.permSync = { ok: false, at, message: `Not authorised — /status, /control, /request and script commands are visible to Discord admins only until you authorise command-permission sync.${skipped}` };
       return;
     }
+
+    const enabledProjects = new Set(listProjectMaps().filter((p) => p.enabled).map((p) => p.id));
+    const containerGrants = listContainerGrants();
+    const targets: Array<{ name: string; subjects: SubjectRef[] }> = [
+      { name: 'status', subjects: containerGrants.filter((g) => g.can_view || g.can_control) },
+      { name: 'control', subjects: containerGrants.filter((g) => g.can_control) },
+      { name: 'request', subjects: listProjectGrants().filter((g) => enabledProjects.has(g.project_map_id)) },
+      ...listScripts().filter((x) => x.enabled && !RESERVED_COMMANDS.has(x.command_name))
+        .map((sc) => ({ name: sc.command_name, subjects: listScriptGrants(sc.id) as SubjectRef[] })),
+    ];
+
     const appId = this.client!.application!.id;
     const failures: string[] = [];
     let synced = 0;
-    for (const sc of listScripts().filter((x) => x.enabled)) {
-      const cmd = registered.find((r) => r.name === sc.command_name);
+    for (const t of targets) {
+      const cmd = registered.find((r) => r.name === t.name);
       if (!cmd) continue;
       const perms = new Map<string, { id: string; type: 1 | 2; permission: true }>();
       for (const r of s.discord_admin_role_ids) perms.set(r, { id: r, type: 1, permission: true });
-      for (const g of listScriptGrants(sc.id)) perms.set(g.subject_id, { id: g.subject_id, type: g.subject_type === 'role' ? 1 : 2, permission: true });
+      for (const g of t.subjects) perms.set(g.subject_id, { id: g.subject_id, type: g.subject_type === 'role' ? 1 : 2, permission: true });
+      if (perms.size > 100) failures.push(`/${t.name}: ${perms.size} roles/users, Discord allows 100 (only the first 100 applied)`);
       const res = await fetch(`https://discord.com/api/v10/applications/${appId}/guilds/${s.discord_guild_id}/commands/${cmd.id}/permissions`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -248,12 +279,12 @@ class DiscordBot {
         signal: AbortSignal.timeout(10_000),
       }).catch((err) => ({ ok: false, status: 0, text: async () => String(err) }) as any);
       if (res.ok) synced++;
-      else failures.push(`/${sc.command_name}: ${res.status} ${(await res.text()).slice(0, 120)}`);
+      else failures.push(`/${t.name}: ${res.status} ${(await res.text()).slice(0, 120)}`);
     }
-    this.permSync = failures.length
-      ? { ok: false, at, message: `Synced ${synced}, failed ${failures.length}: ${failures.join('; ')}` }
-      : { ok: true, at, message: `Visibility synced for ${synced} script command${synced === 1 ? '' : 's'}.` };
-    if (failures.length) console.warn('[discord] command permission sync:', this.permSync.message);
+    this.permSync = failures.length || skipped
+      ? { ok: false, at, message: `Synced ${synced}${failures.length ? `, failed ${failures.length}: ${failures.join('; ')}.` : '.'}${skipped}` }
+      : { ok: true, at, message: `Visibility synced for ${synced} command${synced === 1 ? '' : 's'}.` };
+    if (failures.length || skipped) console.warn('[discord] command permission sync:', this.permSync.message);
   }
 
   // ---------------------------------------------------------------- dispatch
@@ -262,7 +293,7 @@ class DiscordBot {
     if (!i.inGuild() || i.guildId !== getSettings().discord_guild_id) return;
     if (i.isAutocomplete()) return this.handleAutocomplete(i);
     if (i.isChatInputCommand()) {
-      if (i.commandName === 'docker') return this.handleDocker(i);
+      if (i.commandName === 'status' || i.commandName === 'control') return this.handleContainerCommand(i);
       if (i.commandName === 'request') return this.handleRequestCommand(i);
       const script = getScriptByCommand(i.commandName);
       if (script) return this.handleScriptCommand(i, script);
@@ -293,9 +324,8 @@ class DiscordBot {
     const focused = i.options.getFocused(true);
     const q = String(focused.value).toLowerCase();
 
-    if (i.commandName === 'docker' && focused.name === 'container') {
-      const sub = i.options.getSubcommand();
-      const kind = sub === 'status' ? 'view' : 'control';
+    if ((i.commandName === 'status' || i.commandName === 'control') && focused.name === 'container') {
+      const kind = i.commandName === 'status' ? 'view' : 'control';
       const list = (await this.usableContainers(member, kind))
         .filter((c) => !q || c.display_name.toLowerCase().includes(q) || c.container_name.toLowerCase().includes(q))
         .slice(0, 25)
@@ -312,12 +342,12 @@ class DiscordBot {
     return i.respond([]);
   }
 
-  // ---------------------------------------------------------------- /docker
+  // ---------------------------------------------------------------- /status, /control
 
-  private async handleDocker(i: ChatInputCommandInteraction): Promise<void> {
+  private async handleContainerCommand(i: ChatInputCommandInteraction): Promise<void> {
     const member = await this.member(i);
     if (!member) return void i.reply({ content: 'Could not resolve your server membership.', ephemeral: true });
-    const sub = i.options.getSubcommand();
+    const sub = i.commandName === 'status' ? 'status' : i.options.getSubcommand();
     const raw = i.options.getString('container');
     const container = raw ? getContainer(parseInt(raw, 10)) : undefined;
     if (raw && !container) return void i.reply({ content: 'Unknown container — pick one from the list.', ephemeral: true });

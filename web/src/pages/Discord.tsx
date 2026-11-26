@@ -18,7 +18,7 @@ export default function Discord() {
   useEffect(() => {
     api.getSettings().then((r) => { setS(r.settings); setStatus(r.discord); });
     const q = new URLSearchParams(window.location.search);
-    if (q.get('permsLinked')) setMsg({ kind: 'ok', text: 'Authorised — script command visibility will sync now.' });
+    if (q.get('permsLinked')) setMsg({ kind: 'ok', text: 'Authorised — command visibility will sync now.' });
     if (q.get('discordError')) setMsg({ kind: 'error', text: q.get('discordError')! });
     if (q.toString()) window.history.replaceState({}, '', window.location.pathname);
   }, []);
@@ -158,9 +158,9 @@ export default function Discord() {
       <button className="btn btn-primary" onClick={() => save()} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
 
       <div className="card" style={{ marginTop: 16 }}>
-        <h2>Script command visibility</h2>
+        <h2>Command visibility</h2>
         <p className="hint" style={{ marginTop: -6, marginBottom: 10 }}>
-          Script commands are hidden from everyone except Discord admins. To show each one to exactly the roles/people you granted it,
+          All StormWarden commands are hidden from everyone except Discord admins. To show each one to exactly the roles/people you granted it,
           StormWarden needs a one-time authorisation from you (a server manager) — Discord doesn't let bots change command visibility themselves.
         </p>
         <div className="btn-row">
@@ -186,9 +186,11 @@ export default function Discord() {
       <div className="card">
         <h2>Commands members get</h2>
         <ul className="muted" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
-          <li><span className="mono">/docker status [container]</span> · <span className="mono">start</span> · <span className="mono">stop</span> · <span className="mono">restart</span> — only granted containers; never StormWarden itself or Stormsmith's game servers</li>
+          <li><span className="mono">/status [container]</span> — containers they have a View or Start/Stop/Restart grant for</li>
+          <li><span className="mono">/control start|stop|restart &lt;container&gt;</span> — containers they have a Start/Stop/Restart grant for; never StormWarden itself or Stormsmith's game servers</li>
           <li><span className="mono">/request &lt;project&gt;</span> — only projects their role is allowed to request for</li>
-          <li>One hidden command per enabled script, e.g. <span className="mono">/updatefrostgate</span>, visible to its granted roles once visibility sync is authorised</li>
+          <li>One hidden command per enabled script, e.g. <span className="mono">/updatefrostgate</span>, visible to its granted roles</li>
+          <li>Each command is hidden from anyone with no matching grant once visibility sync is authorised (until then, Discord admins only)</li>
         </ul>
       </div>
     </div>

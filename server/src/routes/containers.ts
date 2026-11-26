@@ -4,6 +4,7 @@ import {
   addContainer, audit, deleteContainer, getContainer, isSubjectType, listContainerGrants, listContainers,
   setContainerGrants, updateContainer,
 } from '../db';
+import { discordBot } from '../discord/bot';
 import { getLogs, getStates, listAllContainers, performAction, type ContainerAction } from '../docker';
 import { getSelfContainerName, getStormsmithContainers, protectedMessage, protectedReason } from '../guard';
 import { asyncRoute } from './helpers';
@@ -93,6 +94,7 @@ router.put('/:id/grants', (req, res) => {
     }));
   setContainerGrants(id, clean);
   audit(req.user!.username, 'web', 'container.grants', c.container_name, `${clean.length} grants`);
+  discordBot.queueCommandRefresh(); // grants decide who sees /status and /control
   res.json({ grants: listContainerGrants(id) });
 });
 
@@ -102,6 +104,7 @@ router.delete('/:id', (req, res) => {
   if (!c) return void res.status(404).json({ error: 'Not found' });
   deleteContainer(id);
   audit(req.user!.username, 'web', 'container.remove', c.container_name);
+  discordBot.queueCommandRefresh();
   res.json({ ok: true });
 });
 

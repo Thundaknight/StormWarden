@@ -154,7 +154,7 @@ export function runScript(
 export const COMMAND_NAME_RE = /^[a-z0-9_-]{1,32}$/;
 
 /** Built-in command names that admin scripts may not shadow. */
-export const RESERVED_COMMANDS = new Set(['docker', 'request', 'warden']);
+export const RESERVED_COMMANDS = new Set(['status', 'control', 'request', 'docker', 'warden']);
 
 export function parseOptions(script: Pick<Script, 'options_json'>): ScriptOption[] {
   try {

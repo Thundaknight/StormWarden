@@ -1,6 +1,6 @@
 {
   "name": "stormwarden",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "StormWarden - Discord-driven Docker manager for StormTower: role-gated container control, admin-defined script slash commands, and Vikunja feature requests",
   "workspaces": [

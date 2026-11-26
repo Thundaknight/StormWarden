@@ -2,7 +2,7 @@
 
 StormWarden is Stormsmith's partner. Stormsmith runs the game servers. StormWarden handles **everything else on StormTower**: bots, tools and services, operated from Discord by the people you choose.
 
-- **Container control from Discord.** Members get `/docker status|start|stop|restart`, and only for the containers they've been granted. Containers are always set up beforehand on Unraid (plain Docker or Compose). StormWarden never creates or reconfigures them from Discord, and container logs are only visible in the web panel. Anything beyond start/stop/restart, like pulling or rebuilding, has to be a script command you wrote.
+- **Container control from Discord.** Members get `/status` and `/control start|stop|restart`, only for the containers they've been granted, and only see each command if they hold a matching grant. Containers are always set up beforehand on Unraid (plain Docker or Compose). StormWarden never creates or reconfigures them from Discord, and container logs are only visible in the web panel. Anything beyond start/stop/restart, like pulling or rebuilding, has to be a script command you wrote.
 - **Your scripts as slash commands.** Write a script in the web UI, such as `git pull` + `docker compose -p frostgate up -d --build`. Give it a name like `updatefrostgate` and it becomes `/updatefrostgate` in Discord.
   - Scripts can offer **choices** (fixed lists you define), which reach the script as `$SW_OPT_<NAME>`.
   - Output streams live into an embed, and every run is logged with full output.
@@ -22,21 +22,30 @@ Same stack and look as Stormsmith: Node 22 + TypeScript + Express + better-sqlit
 | **Warden admins in Discord** (Administrator permission, the server owner, or a role you pick under *Discord Bot → Warden admins*) | Every container action, every script, every request project. |
 | **Everyone else in Discord** | Only what a **grant** gives them. A grant targets a **role** (anyone holding it) or a **single user**. |
 
-Grants are set per container (**View** or **Start/Stop/Restart**), per script (allowed or not), and per request project. A request project or script with no grants is **admins only**. Grants add up: one matching grant is enough. Triaging requests (setting the Kanban column and labels) is always admins only.
+Grants are set per container (**View** → `/status`, or **Start/Stop/Restart** → `/status` and `/control`), per script (allowed or not), and per request project. A request project or script with no grants is **admins only**. Grants add up: one matching grant is enough. Triaging requests (setting the Kanban column and labels) is always admins only.
 
 ### Off-limits containers
 
 - **StormWarden itself.** It finds its own container automatically, by matching its hostname to the container ID (override with `STORMWARDEN_CONTAINER=<name>`). It can't be added, started, stopped or restarted through StormWarden. Scripts that mention it by name are refused when you save them.
 - **Stormsmith's game servers.** StormWarden reads the `servers` table from Stormsmith's SQLite file every 30s. By default that's `/mnt/user/appdata/stormsmith/stormsmith.db`, which you can change on the Containers page. It reads a temporary copy, so Stormsmith's file is never touched. Those containers can't be added, and if one you already added later gets imported into Stormsmith, it locks immediately. If the file can't be read, the last known list stays in force and the Containers page shows a warning.
 
-## Hidden script commands
+## Hidden commands
 
-Every script command is registered with `default_member_permissions = 0`, so only Discord admins see it at first. Discord doesn't let a bot reveal commands to particular roles with its own token; that needs a server manager's OAuth token with the `applications.commands.permissions.update` scope. So, once:
+Every command (`/status`, `/control`, `/request` and each script) is registered with `default_member_permissions = 0`, so only Discord admins see it at first. Discord doesn't let a bot reveal commands to particular roles with its own token; that needs a server manager's OAuth token with the `applications.commands.permissions.update` scope. So, once:
 
 1. Fill in **Application ID**, **Client secret** and **Web UI address** on the Discord Bot page. Add the redirect URI it shows to the Developer Portal under OAuth2 → Redirects.
 2. Click **Authorise visibility sync** and approve in Discord.
 
-After that, whenever you change a script's grants or the Warden admin roles, StormWarden re-syncs each command's visibility to exactly those roles and people. The token refreshes automatically; **Revoke** clears it. The run-time permission check still applies, even if someone can see a command.
+After that, whenever you change container, request-project or script grants, or the Warden admin roles, StormWarden re-syncs each command's visibility to exactly those roles and people:
+
+| Command | Visible to (plus Warden admin roles and Discord admins) |
+| --- | --- |
+| `/status` | anyone with a View or Start/Stop/Restart grant on any container |
+| `/control` | anyone with a Start/Stop/Restart grant on any container |
+| `/request` | anyone with a grant on any enabled request project |
+| scripts | that script's grants |
+
+Discord can't hide individual options, so the container and project dropdowns still only list what each person is granted. The token refreshes automatically; **Revoke** clears it. The run-time permission check still applies, even if someone can see a command.
 
 ## Script options (choices)
 

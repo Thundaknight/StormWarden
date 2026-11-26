@@ -195,7 +195,8 @@ function AccessModal({ container, onClose, onSaved }: { container: ManagedContai
       </div>
       <h2>Discord access</h2>
       <p className="hint" style={{ marginTop: -6, marginBottom: 10 }}>
-        View = see it in <span className="mono">/docker status</span>. Start/Stop/Restart = those three actions only — rebuilds and pulls need a script command.
+        View = see it in <span className="mono">/status</span>. Start/Stop/Restart = also <span className="mono">/control start|stop|restart</span>, those three actions only — rebuilds and pulls need a script command.
+        Members with no grant on any container don't see the commands at all.
         Discord admins (Administrator permission, the server owner, or a Warden admin role) always have full access. Logs are web-only.
       </p>
       <GrantEditor grants={grants as any} onChange={(g) => setGrants(g as any)} meta={meta} flags={FLAGS} defaultFlags={{ can_view: true }} />
